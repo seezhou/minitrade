@@ -49,6 +49,7 @@ static/
   js/hooks.js      useAsync / useNow / useDebounced / localStorage
   js/stream.js     浏览器端行情流单例；useLive；useOrderUpdates
   js/charts.js     ECharts 价格图、权益图、环图、对比图、IV 微笑、IV 期限结构
+  js/payoff.js     期权到期收益纯函数（正股腿 + 期权腿，浏览器与 node 测试共用）
   js/indicators.js SMA/EMA/BOLL/RSI/MACD/ATR
   js/ui.js         Card/Logo/Sparkline/Change/Modal/Toast 等
   js/icons.js      内联 SVG 图标
@@ -57,6 +58,15 @@ static/
   js/options-strategy.js  期权策略台、收益图、期权持仓
   js/components/   search / trade-ticket / watch-star
   js/pages/        market / crypto / stock / watchlist / portfolio / orders / account / data
+
+tests/
+  js/payoff.test.mjs         期权收益曲线与每股正股需求（node --test）
+  conftest.py      离线夹具：拦截真实网络、清理 TTL 缓存、假上游、TestClient
+  test_orders_validation.py   订单校验规则（纯函数 + 卖出可卖量）
+  test_realized_pnl.py        已实现盈亏平均成本推导 + 路由串联
+  test_paging.py              加密 / 股票 bars 的 next_page_token 翻页合并
+  test_normalize.py           bar / order / position / account / news 字段归一化
+  test_routes_smoke.py        路由状态码、参数透传、非法请求不下发上游
 ```
 
 ## 关键实现说明
@@ -101,7 +111,9 @@ static/
 - 完整链的「持仓量」列来自 contracts 的 `open_interest`，只有 `chain?full=true` 才有；默认 ATM 视图不请求 contracts，因此不显示该列。切到 `full` 时表格会自动把 ATM 行滚到中间。
 - ATM IV 期限结构 `GET /api/stocks/{symbol}/options/iv-term?expirations=`：最多 6 个到期日，复用 `chain(symbol, expiry, 8)` 取 ATM call/put IV 均值，缓存 10 分钟；某一侧缺 IV 用另一侧，两侧都没有就跳过该点（0DTE 常见，不填 0）。前端是期权页的 `IV Term Structure` 卡片。
 - 当日到期合约可能没有 Greeks/IV，前端默认跳过当日到期并提示。
-- 策略台支持买入看涨/看跌、牛市看涨价差、熊市看跌价差、买入跨式/宽跨式；显示收益图、最大盈亏、盈亏平衡。
+- 策略台支持买入看涨/看跌、牛市看涨价差、熊市看跌价差、买入跨式/宽跨式、备兑看涨、保护性看跌；显示收益图、最大盈亏、盈亏平衡。
+- 备兑看涨 / 保护性看跌带**正股腿**：每张合约要求已持有 100 股（数量从 `/api/positions` 的正股持仓读，按 `avg_entry_price` 算成本），不足时禁用提交；正股腿只进收益图，**不进订单**，所以下单仍是单腿 `/v2/orders`（`position_intent=sell_to_open` / `buy_to_open`），不是 mleg。
+- 备兑看涨是 credit 票：界面和单腿 `limit_price` 都用绝对权利金，credit 只影响 payoff 的现金流方向（`static/js/payoff.js` 的 `payoffCurve()`）。
 - 单腿走标准 `/v2/orders`；多腿走 `order_class=mleg` + `legs[]` + 净限价；前端只对多腿开放限价单。
 - 期权持仓从 `/v2/positions` 过滤，平仓走 `/api/stocks/{symbol}/options/positions/{contract}`。
 
@@ -192,9 +204,21 @@ WS   /ws/orders
 cd D:\minitrade
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt   # 仅测试用：pytest + httpx
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-python test_alpaca_connection.py
+python -m pytest                                 # 后端离线回归，约 1 秒
+node --test "tests/js/*.test.mjs"                 # 前端纯逻辑（收益曲线），零依赖
+python test_alpaca_connection.py                 # 手工连通性检查
 ```
+
+`package.json` 只声明 `"type": "module"` 和一个 `npm run test:js` 脚本，**没有构建步骤、没有 npm 依赖**：它存在的唯一原因是让 node 能直接 import `static/js/*.js`。
+
+`python -m pytest` 不需要 `.env`、不需要启动服务、不联网：
+
+- `tests/conftest.py` 把 `requests.Session.request` 全部拦截，漏 mock 的上游调用会直接失败。
+- 每个测试用假上游替换 `data_get` / `trading_get` / `trading_send`，只断言字段形状和业务规则。
+- 覆盖：订单校验与可卖量、已实现盈亏推导、bars 翻页合并、字段归一化、路由状态码与参数透传。
+- 不覆盖：实时价格、合约数量、真实下单、浏览器渲染（仍靠 Playwright / 截图）。
 
 已做过的检查：
 
@@ -224,11 +248,12 @@ python test_alpaca_connection.py
 7. **期权/加密交易**：已接入纸面账户；期权多腿仅限价，加密单笔最低约 $10。期权流动性/滑点可能明显，学习用途不构成建议。
 8. **缓存无上限**：长时间浏览大量代码后进程内缓存会增长；可加 LRU 上限，目前影响很小。
 9. **行情流订阅上限**：代码限制 28 个符号，聚焦符号额外 2 个订阅；若 Alpaca 权限变化需复核。
-10. **测试脚本**：当前为手工冒烟 + 浏览器 CDP 检查，尚未加入 CI 自动化测试。
+10. **测试覆盖边界**：`tests/` 已覆盖订单校验、已实现盈亏推导、bars 翻页、字段归一化与路由串联（离线 pytest，秒级）；但仍**没有 CI 流水线**，也没有前端自动化测试，浏览器渲染靠 Playwright 手工跑，真实上游连通性靠 `test_alpaca_connection.py`。
 11. **IEX 逐笔/报价不完整**：历史 trades/quotes 只有 IEX 交易所，不是 consolidated SIP；条数和价格可能与综合行情偏离，页面上必须保留说明，不能当全市场成交。
 12. **条件码接口的 tape 参数**：Alpaca 的 `/v2/stocks/meta/conditions` 会 404，实际是 `/v2/stocks/meta/conditions/{trade|quote}` 且必须带 `tape=A|B|C`；本地接口已包一层，默认 `trade` + `C`。
 13. **完整链行数多**：`chain?full=true` 一次可能返回 80–100 行/侧（AAPL 近月 158 个合约），靠 `.option-scroll` 的 440px 高度滚动（已做 ATM 自动居中）；不要去掉 `max-height`，否则会把页面撑爆。
 14. **已实现盈亏是推导值**：Alpaca 的 activities 没有成本基准字段，`/api/account/realized-pnl` 用平均成本法从 FILL 推导，按月切窗（每窗 page_size=100），不含手续费与税费；卖单在窗口内找不到对应买入时返回 `null` + `reason`，不要改成猜测值。逐笔流水仍以 `/api/activities` 为准。
+15. **期权页窗口缩小后横向溢出**：在宽屏打开期权页再缩到移动宽度，`main.content` 的 `scrollWidth` 会停在约 979px（`documentElement` 多出约 589px），再触发 `resize` 也不恢复；直接以 390px 打开则正常（0 溢出）。属既有行为，与策略台无关，尚未定位到具体元素。
 
 ## 安全边界
 

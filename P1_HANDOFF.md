@@ -79,6 +79,7 @@ app/
   crypto.py        加密行情、K 线、订单、持仓
   trading.py       账户、组合历史、持仓、股票订单、活动、自选
   streams.py       股票行情 hub + 订单更新 hub + WS 路由
+  crypto_stream.py 加密行情 hub（单条上游连接）+ /ws/crypto
 
 static/
   index.html
@@ -134,6 +135,9 @@ static/
 ```powershell
 cd D:\minitrade
 
+# 离线测试（不需要 key、不需要启服务、不联网）
+.\.venv\Scripts\python.exe -m pytest
+
 # Python 导入
 .\.venv\Scripts\python.exe -c "import app.main; print('py ok')"
 
@@ -146,6 +150,17 @@ Get-ChildItem -Recurse static\js -Filter *.js | ForEach-Object {
 # 健康检查
 Invoke-WebRequest http://127.0.0.1:8000/api/health -UseBasicParsing
 ```
+
+### 测试套件
+
+`tests/` 是离线回归套件（pytest），装依赖用 `pip install -r requirements-dev.txt`。
+
+- 只测**我们写的逻辑**：订单校验、已实现盈亏推导、翻页合并、字段归一化、路由串联。
+- 不由测试断言 Alpaca 的实时价格 / 合约数量 / 新闻条数；真实连通性仍靠 `python test_alpaca_connection.py` 手工跑。
+- `tests/conftest.py` 把 `requests.Session.request` 全部拦死：任何忘记 mock 的上游调用会直接 AssertionError，不会偷偷联网下单。
+- 改 `_validate_order` / `normalize_*` / `_paged_*` / `_derive_realized` 或对应路由后，先跑 pytest 再启服务。
+- 前端纯逻辑用 `node --test "tests/js/*.test.mjs"`（等同 `npm run test:js`），零依赖、秒级；目前覆盖 `payoffCurve` / `requiredShares`。根目录 `package.json` 只为 `"type": "module"`，**不引入构建步骤**。
+- 改期权策略台、收益图或合约乘数相关逻辑，先跑 node 测试再在浏览器里看一次曲线。
 
 ### 重启服务
 
@@ -198,7 +213,7 @@ Chromium 已装在 `%LOCALAPPDATA%\ms-playwright`。至少检查：桌面 1600×
 | T1-2 | 期权历史 + IV Term Structure | 中 | 先做 | ✅ 已完成 2026-11-04 |
 | T1-3 | 股票历史逐笔 / 历史报价 | 低–中 | 可并行 | ✅ 已完成 2026-11-04 |
 | T1-4 | 条件码 / 交易所元数据 | 低 | 可选 | ✅ 已完成 2026-11-04 |
-| T2-1 | 加密 WebSocket 实时流 | 高 | 不建议最便宜模型 | 待做 |
+| T2-1 | 加密 WebSocket 实时流 | 高 | 不建议最便宜模型 | ✅ 已完成 2026-11-04 |
 | T3-1 | OCO/OTO + client_order_id | 中 | 下一批优先 | ✅ 已完成 2026-11-04 |
 | T3-2 | 账户配置 PATCH | 中低 | 下一批优先 | ✅ 已完成 2026-11-04 |
 | T3-3 | Activities 筛选 + 已实现盈亏 | 中 | 后做 | ✅ 已完成 2026-11-04 |
@@ -276,6 +291,17 @@ T1-1 ~ T1-4 已实现并验收，后续接手不要重做，只需在现有实�
 - `GET /api/account/realized-pnl?days=&after=&until=`：按月切窗拉 `FILL,DIV,INT`，平均成本法推导；卖单没有已知成本时 `realized_pl: null` 并给 `reason`，不猜成本；缓存 120s
 - 前端：「成交明细」加 成交/分红/利息/全部 与日期范围；账户页新增「已实现盈亏」卡片（总盈亏、分红、利息、按代码明细），支持 30 天 / 90 天 / 1 年 / 2 年 切换
 - 单测：7 组合成 FILL 用例（含卖出无成本、卖空翻转）全部通过；纸面账户目前无活动记录，接口返回空数组 + 0，不报错
+
+### 5.3 已完成记录（2026-11-04，批次 C）
+
+**T2-1 加密 WebSocket 实时流**
+
+- 文件：`app/crypto_stream.py`（新增）、`app/config.py`、`app/main.py`、`static/js/stream.js`、`static/js/pages/crypto.js`、`P1_HANDOFF.md`
+- 后端：`CryptoHub` + `_CryptoUpstream`（后台线程，指数退避 1/2/4→30s）；上游 `wss://stream.data.alpaca.markets/v1beta3/crypto/us`，进程内只建一条连接，按引用计数订阅/退订 `trades|quotes|bars`；`/ws/crypto` 只推数据，不动订单逻辑
+- 消息格式与 ticket 原文的偏差：按 `MarketHub` 风格改成批量，`{"type":"crypto","at":...,"ticks":{"BTC/USD":{price,mid,bid,ask,bar,ts,quote_ts}}}`；另有 `{"type":"crypto_status","state":"idle|connecting|connected|reconnecting|error"}`
+- 关键取舍：`SYMBOL_RE` 不接受 `/`，加密对改用 `CRYPTO_SYMBOLS` 白名单校验；免费加密流的 trade/bar 很稀疏（实测 75s 内 1 笔 trade、1 根 1Min bar），所以 quote 回调额外给 `mid`，前端 `price = tick.price ?? tick.mid ?? snapshot.price`，否则头部价格会长时间不动
+- 前端：`stream.js` 新增 `cryptoStream` + `useCryptoLive(symbols)`（单例、最后一条订阅释放时关闭浏览器 WS）；`crypto.js` 用 tick 覆盖最新价/买价/卖价与涨跌幅，K 线通过 `PriceChart` 的 `livePrice/liveTs` 更新最后一根并保留缩放，15s / 30s 轮询保留为兜底
+- 验收：`/ws/crypto` 订阅 BTC/USD 收到 `connected` + 29 个批次（bid/ask/mid 29、price/bar 18）；两个标签页只产生 1 条上游连接；切换 BTC→ETH 自动重订阅且无旧数据残留；重启服务后前端自动重连回 LIVE；Playwright 桌面 1600 / 移动 390 无横向溢出、0 控制台报错、深色正常
 
 ---
 
@@ -682,7 +708,7 @@ GET /api/account/realized-pnl
 
 以下不是 P1 必需项。不要和 T1 混做。
 
-### T0-1 备兑看涨 / 保护性看跌
+### T0-1 备兑看涨 / 保护性看跌（✅ 已完成 2026-11-05）
 
 - 在 `static/js/options-strategy.js` 的 `STRATEGIES` 增加：
   - `covered_call`: 卖出 Call + 需要 100 股/合约的正股
@@ -690,6 +716,17 @@ GET /api/account/realized-pnl
 - 校验 `store.positions` 中正股数量
 - 收益图要把正股腿算进去
 - 不要在没有正股时允许提交
+
+**实现记录**
+
+- 文件：`static/js/options-strategy.js`、`static/js/payoff.js`（新增）、`tests/js/payoff.test.mjs`（新增）、`package.json`（新增，只为让 node 跑 ESM 测试）
+- `STRATEGIES` 用 `stock: "long"` 标记带正股腿的策略；`legs` 仍只放期权腿，所以下单仍是**单腿** `/v2/orders`（`position_intent=sell_to_open` / `buy_to_open`），不走 mleg —— 正股不是订单的一部分
+- 正股数量从 `store.positions` 取（排除 `us_option` 与 OCC 代码），需要 `100 × 合约数`；不足时显示「还差 N 股」并禁用提交，`submit()` 内再校验一次
+- 收益图数学抽到 `static/js/payoff.js` 的 `payoffCurve()`（零依赖，浏览器与 `node --test` 共用）：正股腿 `(price - basis) * shares`，basis 取 `avg_entry_price`，缺失时退回现价
+- 备兑看涨是 credit 票：`netMid` 为负，但界面与 `limit_price` 一律用绝对值，`credit` 只影响 payoff 的现金流符号。不加这个，原来的 `Math.max(0.01, netMid)` 会把卖出价压成 0.01
+- `unboundedProfit` 增加 `protective_put`（持股上行不封顶）；`covered_call` 保持有限最大收益
+- 验收：假持仓（100 股，成本 340）→ 提交可用、显示「正股已覆盖」、盈亏平衡 338.78 = 340 − 1.22、最大收益 1872 = (357.5 − 340) × 100 + 122；合约数改 2 → 需要 200 股、按钮禁用；无持仓时按钮禁用并提示还差 100 股；提交 payload 为单腿 `sell_to_open` + 正数 `limit_price`；桌面与 390 视口 0 控制台错误、无横向溢出
+- 已知限制：纸面账户目前没有正股持仓，界面验证用 Playwright 拦截 `/api/positions` 注入假持仓，**没有真实买入正股**（符合“不留测试持仓”）。后端也不校验正股覆盖（Level 3 允许裸卖 call），覆盖判断只在界面层
 
 ### T0-2 铁鹰 / 信用价差
 
@@ -732,19 +769,23 @@ Ticket:
 12. **服务**：必须单 worker；多 worker 会重复建上游 WS。
 13. **缓存**：外部数据用 `cache.get_or_set`；不要每次请求都打 Alpaca。
 14. **移动端**：新 UI 必须在 390px 宽下检查；表格用 `.table-wrap` / 横向滚动。
+15. **加密 K 线区间**：`/v1beta3/crypto/us/bars` 不带 `start` 只返回当天；且服务端分页窗口远小于 `limit`（1Hour 约 178 根/页），必须按 `next_page_token` 翻页合并。少了任一条，长区间只会拿到最老一页，看起来像「1Y 只有一天」（已由 `_paged_crypto_bars` 修掉，别再退回单次请求）。
+16. **测试**：`tests/` 的假上游按 Alpaca **字段名**构造，改归一化字段时同步改 `test_normalize.py`，否则测试会和真实返回一起腐烂。不要在测试里断言实时数值。
+17. **期权 credit 符号**：备兑看涨这类 credit 策略的 `netMid` 是负数，但界面显示和**单腿** `limit_price` 必须用绝对值；只有 payoff 的现金流方向由 `credit` 控制。带符号净价只适用于 mleg 组合单，别混到单腿。
 
 ---
 
 ## 9. 推荐执行顺序
 
-T1-1 ~ T1-4、T3-1 ~ T3-3 已完成，剩余只有两条，都需要更强的模型或先只做后端：
+T1-1 ~ T1-4、T3-1 ~ T3-3、T2-1、T0-1 已完成，剩余只有一条：
 
-1. **T2-1 加密 WebSocket 实时流**：先读 `app/streams.py` 的 `MarketHub` / `_MarketUpstream`，新建 `app/crypto_stream.py`；一条上游连接 + 订阅计数 + 指数退避重连（1/2/4→30s），前端保留 15 秒轮询兜底；`/ws/crypto` 只推数据，不要顺手改订单逻辑。
-2. **T4-1 新闻流 / 提醒**：最后做。价格提醒用前端 localStorage，不依赖 Alpaca 不存在的 alert API；新闻流先做后端聚合 + 15 分钟缓存。
+1. **T4-1 新闻流 / 提醒**：最后做。价格提醒用前端 localStorage，不依赖 Alpaca 不存在的 alert API；新闻流先做后端聚合 + 15 分钟缓存。
+
+另外 **T0-2（铁鹰 / 信用价差）仍然没做**，也是剩余风险最高的一项：mleg 的 `limit_price` 在 credit 下是负数，必须先实测确认方向，否则会把 debit 做成 credit。
 
 **可选的小尾巴**
 
-2026-11-04 已全部完成：ATM 合约日线图（1M/3M/6M）、完整链自动滚到 ATM、`open_interest` 归一化 + 完整链「持仓量」列、已实现盈亏 30 天 / 90 天 / 1 年 / 2 年切换。暂时没有剩余尾巴，下一步直接做 T2-1。
+2026-11-04 已全部完成：ATM 合约日线图（1M/3M/6M）、完整链自动滚到 ATM、`open_interest` 归一化 + 完整链「持仓量」列、已实现盈亏 30 天 / 90 天 / 1 年 / 2 年切换。暂时没有剩余尾巴，下一步只剩 T4-1。
 
 ---
 
@@ -768,6 +809,7 @@ T1-1 ~ T1-4、T3-1 ~ T3-3 已完成，剩余只有两条，都需要更强的模
 - OCO/OTO 校验：缺止损、OTO 无出口、OTO 用止损主单、bracket 卖出全部 422
 - client_order_id：OTO 订单按 client id 查回（200），撤单后 `open=0`、`positions=0`，不存在的 id 返回 404
 - Activities 筛选（类型 + 日期）200；`realized-pnl` 无活动时返回空数组 + 0，坏日期区间 422
+- 加密实时流 `/ws/crypto`：订阅后收到 `connected` + 批量 tick（bid/ask/mid，另有稀疏的 price/bar）；两个标签页只建 1 条上游连接；BTC↔ETH 切换自动重订阅；重启服务后前端自动重连回 LIVE
 - Playwright：桌面 1600px 与移动 390px 无横向溢出，控制台 0 报错
 
 这些已经存在。新 ticket 不要重写它们。
