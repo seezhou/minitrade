@@ -10,6 +10,8 @@ import { PageHead, Card, Badge, Empty, ErrorBanner, Skeleton, LoadingRow, Logo, 
 import { PriceChart, CompareChart, IVSmileChart, OptionTermChart, OptionHistoryChart } from "../charts.js";
 import { OptionsStrategy, OptionPositions } from "../options-strategy.js";
 import { WatchStar } from "../components/watch-star.js";
+import { PriceAlertButton } from "../components/price-alerts.js";
+import { useNewsWatch } from "../news.js";
 
 const RANGES = ["1D", "5D", "1M", "3M", "6M", "1Y", "5Y"];
 const RANGE_SESSIONS = { "1M": 21, "3M": 63, "6M": 126, "1Y": 252 };
@@ -51,6 +53,9 @@ export function StockPage({ symbol, tab = "overview" }) {
     [symbol],
   );
   const { ticks, trades, status } = useLive([symbol], { focus: true });
+  // Alpaca's news websocket accepts auth/subscribe but pushes nothing on this account,
+  // so "new news" is an incremental poll. It only raises a prompt, never auto-refreshes.
+  const newsLive = useNewsWatch([symbol], { filter: symbol });
 
   const summary = summaryQuery.data;
   const asset = summary?.asset;
@@ -175,6 +180,7 @@ export function StockPage({ symbol, tab = "overview" }) {
         <div class="stock-head-actions" style="margin-top:9px">
           <${WatchStar} symbol=${symbol} size=${17} />
           <button class="btn btn-sm" onClick=${openSearch}><${Icon} name="search" size=${13} />切换股票</button>
+          <${PriceAlertButton} symbol=${symbol} price=${price} />
           ${asset.has_options ? html`<button class="btn btn-sm" onClick=${() => {
             if (activeTab === "options") document.getElementById("option-strategy")?.scrollIntoView({ behavior: "smooth", block: "start" });
             else navigate(stockPath(symbol, "options"));
@@ -237,7 +243,14 @@ export function StockPage({ symbol, tab = "overview" }) {
           <div class="card-body">
             ${activeTab === "overview" && html`<${OverviewTab} summary=${summary} news=${newsQuery.data || []} symbol=${symbol} tick=${tick} trades=${tradesAscending} />`}
             ${activeTab === "analysis" && html`<${AnalysisTab} summary=${summary} symbol=${symbol} />`}
-            ${activeTab === "news" && html`<${NewsTab} news=${newsQuery.data || []} loading=${newsQuery.loading} error=${newsQuery.error} reload=${newsQuery.reload} />`}
+            ${activeTab === "news" && html`<${NewsTab}
+              news=${newsQuery.data || []}
+              loading=${newsQuery.loading}
+              error=${newsQuery.error}
+              reload=${newsQuery.reload}
+              fresh=${newsLive.pending}
+              onRefresh=${() => { newsLive.take(); newsQuery.reload(); }}
+            />`}
             ${activeTab === "actions" && html`<${ActionsTab} symbol=${symbol} />`}
             ${activeTab === "options" && html`<${OptionsTab} symbol=${symbol} spot=${price} />`}
             ${activeTab === "orders" && html`<${OrdersTab} symbol=${symbol} />`}
@@ -435,12 +448,17 @@ function AnalysisTab({ summary, symbol }) {
   </div>`;
 }
 
-function NewsTab({ news, loading, error, reload }) {
+function NewsTab({ news, loading, error, reload, fresh = [], onRefresh }) {
   const [expanded, setExpanded] = useState(null);
   if (error) return html`<${ErrorBanner} message=${error} onRetry=${reload} />`;
   if (loading && !news.length) return html`<${LoadingRow} label="正在读取相关新闻…" />`;
-  if (!news.length) return html`<${Empty} icon="news" title="暂时没有新闻" description="Alpaca 新闻源没有返回这只股票的近期新闻。" />`;
+  const banner = fresh.length ? html`<div class="text-sm" style="display:flex;gap:10px;align-items:center;justify-content:space-between;padding:8px 11px;border-radius:9px;border:1px solid var(--brand-line);background:var(--brand-soft);margin-bottom:10px">
+    <span><${Badge} tone="blue">${fresh.length} 条新新闻<//> <span class="text-muted">${fresh[0]?.headline || ""}</span></span>
+    <button class="card-link" onClick=${onRefresh}>刷新列表</button>
+  </div>` : null;
+  if (!news.length) return html`<div class="stack">${banner}<${Empty} icon="news" title="暂时没有新闻" description="Alpaca 新闻源没有返回这只股票的近期新闻。" /></div>`;
   return html`<div class="stack">
+    ${banner}
     ${news.map((item) => html`<article class="news-item" style="grid-template-columns:96px minmax(0,1fr)">
       ${item.image ? html`<img class="news-thumb" style="width:96px;height:70px" src=${item.image} alt="" loading="lazy" referrerpolicy="no-referrer" onError=${(event) => { event.currentTarget.style.visibility = "hidden"; }} />` : html`<span class="news-thumb placeholder" style="width:96px;height:70px"><${Icon} name="news" size=${20} /></span>`}
       <div class="news-body">

@@ -2,6 +2,7 @@ import { Component, render } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { html, cls, fmt, toneClass, SESSION_LABEL } from "./utils.js";
 import { useLive, useOrderUpdates } from "./stream.js";
+import { usePriceAlerts } from "./alerts.js";
 import { clearToast, loadOverview, loadWatchlists, notify, openSearch, preload, refreshTrading, useStore } from "./store.js";
 import { parseRoute, navigate } from "./router.js";
 import { useTheme } from "./theme.js";
@@ -204,6 +205,9 @@ function App() {
     if (!store.overview) loadOverview();
     if (!store.watchlists.length) loadWatchlists();
   }, []);
+
+  // Price alerts are evaluated app-wide, so a rule fires whichever page is open.
+  usePriceAlerts();
 
   useOrderUpdates((event) => {
     const order = event.order || {};

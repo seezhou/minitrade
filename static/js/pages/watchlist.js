@@ -7,6 +7,7 @@ import { addWatchlistLocal, loadWatchlists, mutateWatchlist, notify, openTrade, 
 import { navigate, stockPath } from "../router.js";
 import { Icon } from "../icons.js";
 import { PageHead, Card, Badge, Empty, ErrorBanner, LoadingRow, Logo, Sparkline, Modal } from "../ui.js";
+import { useNewsWatch } from "../news.js";
 
 const SUGGESTIONS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "SPY"];
 
@@ -16,6 +17,8 @@ export function WatchlistPage() {
   const [activeId, setActiveId] = useState(null);
   const [modal, setModal] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [newsOpen, setNewsOpen] = useState(false);
+  const [newsSnapshot, setNewsSnapshot] = useState([]);
   useDocumentTitle("自选");
 
   useEffect(() => {
@@ -32,6 +35,8 @@ export function WatchlistPage() {
 
   const active = lists.find((item) => item.id === activeId) || lists[0] || null;
   const symbols = active?.symbols || [];
+  // Counts only; the list itself is never auto-refreshed.
+  const newsLive = useNewsWatch(symbols);
   const quotesQuery = useAsync(
     () => (symbols.length ? api(`/api/quotes?symbols=${encodeURIComponent(symbols.join(","))}&sparkline=true`) : Promise.resolve([])),
     [active?.id, symbols.join(",")],
@@ -119,7 +124,10 @@ export function WatchlistPage() {
       eyebrow="关注列表 · 保存在 Alpaca 账户"
       title="自选"
       sub="多个列表、服务器端持久化、实时价格与迷你走势。用星标从任何页面添加股票。"
-      actions=${html`<button class="btn btn-primary btn-sm" onClick=${() => setModal({ type: "create" })}><${Icon} name="plus" size=${14} />新建列表</button>`}
+      actions=${html`<div class="row">
+        ${newsLive.count ? html`<button class="btn btn-sm" onClick=${() => { setNewsSnapshot(newsLive.pending); setNewsOpen(true); }}><${Icon} name="news" size=${13} />${newsLive.count} 条新新闻</button>` : null}
+        <button class="btn btn-primary btn-sm" onClick=${() => setModal({ type: "create" })}><${Icon} name="plus" size=${14} />新建列表</button>
+      </div>`}
     />
     ${store.watchlistsError && html`<${ErrorBanner} message=${store.watchlistsError} onRetry=${() => loadWatchlists(true)} />`}
 
@@ -175,6 +183,18 @@ export function WatchlistPage() {
     ${confirmDelete && html`<${Modal} title="删除自选列表" subtitle=${confirmDelete.name} onClose=${() => setConfirmDelete(null)}>
       <div class="text-sm">删除后列表和其中的股票都会从 Alpaca 账户移除，但不会影响持仓或订单。</div>
       <div class="modal-actions"><button class="btn" onClick=${() => setConfirmDelete(null)}>取消</button><button class="btn btn-danger" onClick=${() => deleteList(confirmDelete)}>确认删除</button></div>
+    <//>`}
+    ${newsOpen && html`<${Modal} title="自选股新新闻" subtitle=${`监控 ${symbols.length} 只股票 · 最近 ${newsSnapshot.length} 条`} onClose=${() => { setNewsOpen(false); newsLive.take(); }}>
+      <div class="stack-sm">
+        ${newsSnapshot.map((item) => html`<article class="news-item" style="grid-template-columns:96px minmax(0,1fr)">
+          <div class="text-xs text-muted">${fmt.time(item.created_at)}</div>
+          <div>
+            <a class="news-headline" href=${item.url} target="_blank" rel="noreferrer">${item.headline}</a>
+            <div class="text-xs text-muted">${(item.symbols || []).join(" · ")}${item.source ? ` · ${item.source}` : ""}</div>
+          </div>
+        </article>`)}
+      </div>
+      <div class="modal-note">新闻来自 Alpaca 新闻源，按需拉取；关闭后计数清零。</div>
     <//>`}
   </div>`;
 }

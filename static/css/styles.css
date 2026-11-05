@@ -622,7 +622,7 @@ img { display: block; }
 .stock-price .big { font-size: 34px; font-weight: 800; letter-spacing: -1.2px; font-variant-numeric: tabular-nums; line-height: 1; }
 .stock-price .delta { font-size: 13px; font-weight: 700; }
 .stock-price .asof { font-size: 9.5px; color: var(--muted-2); }
-.stock-head-actions { display: flex; align-items: center; gap: 7px; }
+.stock-head-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 
 .fact-strip {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
