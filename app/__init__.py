@@ -1,0 +1,1 @@
+"""MiniTrade application package."""

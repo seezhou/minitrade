@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f3f5f8" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="MiniTrade — 基于 Alpaca 模拟账户的美股实时行情与多维分析终端，仅用于学习。" />
+    <title>MiniTrade · 模拟交易终端</title>
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("minitrade-theme");
+          var theme = saved === "dark" || saved === "light" ? saved : "light";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", theme === "dark" ? "#060b13" : "#f3f5f8");
+        } catch (error) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/css/styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "preact": "/static/vendor/preact.module.js",
+          "preact/hooks": "/static/vendor/preact-hooks.module.js",
+          "htm": "/static/vendor/htm.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <div class="boot-screen">
+        <div class="boot-mark">↗</div>
+        <div class="boot-text">MiniTrade</div>
+        <div class="boot-sub">正在连接 Alpaca 模拟行情…</div>
+      </div>
+    </div>
+    <noscript><div class="noscript">MiniTrade 需要启用 JavaScript。</div></noscript>
+    <script src="/static/vendor/echarts.min.js"></script>
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>
