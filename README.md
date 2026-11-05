@@ -43,6 +43,7 @@
 - 单腿和 Alpaca Level 3 `mleg` 多腿组合订单，纸面账户提交
 - 期权持仓、平仓、订单状态同步
 - 当日到期合约缺少 Greeks 时会明确提示并自动优先选择有 Greeks 的到期日
+- **价格提醒 / 新新闻提示**：提醒规则只存本机 `localStorage`（Alpaca 没有 alert API），任何页面打开时每 60 秒用延迟行情检查，命中弹 Toast，可另开系统通知；新闻走 `/api/news` 增量轮询，只在个股页 / 自选页给「有新新闻」提示，不自动刷屏
 
 ![期权策略台](docs/screenshot-options.png)
 

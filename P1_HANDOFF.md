@@ -159,7 +159,7 @@ Invoke-WebRequest http://127.0.0.1:8000/api/health -UseBasicParsing
 - 不由测试断言 Alpaca 的实时价格 / 合约数量 / 新闻条数；真实连通性仍靠 `python test_alpaca_connection.py` 手工跑。
 - `tests/conftest.py` 把 `requests.Session.request` 全部拦死：任何忘记 mock 的上游调用会直接 AssertionError，不会偷偷联网下单。
 - 改 `_validate_order` / `normalize_*` / `_paged_*` / `_derive_realized` 或对应路由后，先跑 pytest 再启服务。
-- 前端纯逻辑用 `node --test "tests/js/*.test.mjs"`（等同 `npm run test:js`），零依赖、秒级；目前覆盖 `payoffCurve` / `requiredShares`。根目录 `package.json` 只为 `"type": "module"`，**不引入构建步骤**。
+- 前端纯逻辑用 `node --test "tests/js/*.test.mjs"`（等同 `npm run test:js`），零依赖、秒级；目前 31 例，覆盖 `payoffCurve` / `requiredShares` 与价格提醒的 `shouldTrigger` / `evaluate` / `describeTrigger`。根目录 `package.json` 只为 `"type": "module"`，**不引入构建步骤**。
 - 改期权策略台、收益图或合约乘数相关逻辑，先跑 node 测试再在浏览器里看一次曲线。
 
 ### 重启服务
@@ -217,7 +217,7 @@ Chromium 已装在 `%LOCALAPPDATA%\ms-playwright`。至少检查：桌面 1600×
 | T3-1 | OCO/OTO + client_order_id | 中 | 下一批优先 | ✅ 已完成 2026-11-04 |
 | T3-2 | 账户配置 PATCH | 中低 | 下一批优先 | ✅ 已完成 2026-11-04 |
 | T3-3 | Activities 筛选 + 已实现盈亏 | 中 | 后做 | ✅ 已完成 2026-11-04 |
-| T4-1 | 新闻流 / 提醒 | 中高 | 最后做 | 待做 |
+| T4-1 | 新闻流 / 提醒 | 中高 | 最后做 | ✅ 已完成 2026-11-05（新闻走 REST 增量，见 5.4） |
 
 ### 5.1 已完成记录（2026-11-04）
 
@@ -690,7 +690,7 @@ GET /api/account/realized-pnl
 
 ---
 
-### T4-1 新闻实时流 / 提醒（P2，最后做）
+### T4-1 新闻实时流 / 提醒（✅ 已完成 2026-11-05）
 
 **优先级**：P2
 **难度**：中高
@@ -701,6 +701,19 @@ GET /api/account/realized-pnl
 - 前端在自选/个股页显示“新新闻”提示，不要自动刷屏
 - 价格提醒：前端本地规则 + `localStorage`，不要依赖 Alpaca 没有的 alert API
 - 验收：刷新后规则保留；浏览器通知/Toast 可关闭
+
+**实现记录（含一处与原始 ticket 的偏差）**
+
+- **偏差：新闻流不可用，改走 REST 增量。** 2026-11-05 实测：`wss://stream.data.alpaca.markets/v1beta1/news` 的 auth 与 `subscribe {"news":["*"]}` 都返回成功（`{"T":"success","msg":"authenticated"}` + `{"T":"subscription","news":["*"]}`），但 120 秒内**零条**推送；同一时刻 REST `/v1beta1/news` 有刚发布的头条。显式订阅 `["AAPL","SPY","MSFT",...]` 也是 90 秒零条。结论：该账户没有新闻流权限（与 SIP 实时 403 同类）。因此改为**轮询 `/api/news` 做增量检测**，功能等价、延迟 60 秒。
+- 文件：`static/js/news.js`（新增）、`static/js/alert-rules.js`（新增，纯函数）、`static/js/alerts.js`（新增）、`static/js/components/price-alerts.js`（新增）、`tests/js/alert-rules.test.mjs`（新增）；改动 `static/js/pages/stock.js`、`static/js/pages/watchlist.js`、`static/js/app.js`、`static/css/styles.css`
+- `news.js`：模块级单例 `newsWatch`，多个页面注册符号后**合并成一次请求**，60 秒一轮；用 `seen` 集合记住已见 id，新 id 只累计成计数，**从不自动刷新列表**。页面关闭订阅后自动停轮询。
+- 个股页「新闻」标签顶部出现「N 条新新闻 + 最新标题」提示条，点击「刷新列表」才重新拉取（带 `content=true`，所以展开全文仍然可用）。自选页页头出现「N 条新新闻」按钮，点开是一个 Modal 列出待读头条，关闭即清零。
+- 价格提醒：`alert-rules.js` 是零依赖纯函数（`normalizeRule` / `shouldTrigger` / `evaluate` / `describeTrigger`），`alerts.js` 负责 localStorage 与全局评估，`App()` 里挂一次 `usePriceAlerts()`，所以**任何页面**打开时都会检查。每 60 秒拉一次 `/api/quotes`（只取还有等待中规则的符号），命中后写 `triggered_at` 防止重复触发。
+- 存储：`minitrade-price-alerts`（规则数组）、`minitrade-alerts-notify`（系统通知开关）。刷新/重开页面保留；清除浏览器数据会一起删除。
+- UI：个股页头部「提醒」按钮（带待触发条数）→ 弹窗内可加/删规则、看已触发状态、开关系统通知；移动端表单自动换行。
+- 布局修复：头部多一个按钮后 390px 视口下 `.stock-head-actions` 溢出 11px，给该容器补 `flex-wrap: wrap`。
+- 测试：`tests/js/alert-rules.test.mjs` 15 例（边界 `>=`/`<=`、已触发不再触发、无报价跳过、顺序保持、`describeTrigger` 文案）。
+- 验收（Playwright）：加一条「低于 $9,999」→ 2 秒内 Toast「AAPL 低于 $9,999.00 已触发（现价 $353.38）」、规则行显示「已于 10:05 ET 触发」；刷新后规则仍在（localStorage 1 条）；「清除已触发」可清空。个股页 mock `/api/news` 增量 → 提示「1 条新新闻」→ 点刷新 → 提示消失且新标题入列。自选页同法 → 按钮「1 条新新闻」→ Modal 列出待读头条。桌面与 390px 均 0 控制台错误、0 横向溢出。
 
 ---
 
@@ -772,27 +785,30 @@ Ticket:
 15. **加密 K 线区间**：`/v1beta3/crypto/us/bars` 不带 `start` 只返回当天；且服务端分页窗口远小于 `limit`（1Hour 约 178 根/页），必须按 `next_page_token` 翻页合并。少了任一条，长区间只会拿到最老一页，看起来像「1Y 只有一天」（已由 `_paged_crypto_bars` 修掉，别再退回单次请求）。
 16. **测试**：`tests/` 的假上游按 Alpaca **字段名**构造，改归一化字段时同步改 `test_normalize.py`，否则测试会和真实返回一起腐烂。不要在测试里断言实时数值。
 17. **期权 credit 符号**：备兑看涨这类 credit 策略的 `netMid` 是负数，但界面显示和**单腿** `limit_price` 必须用绝对值；只有 payoff 的现金流方向由 `credit` 控制。带符号净价只适用于 mleg 组合单，别混到单腿。
+18. **新闻流没有权限**：`wss://stream.data.alpaca.markets/v1beta1/news` 在本账户认证/订阅都成功但**不推送数据**（REST 同时有新闻）。别再花时间重试 websocket，`news.js` 走的是 `/api/news` 的 60 秒增量轮询。要恢复实时流，先确认账户是否被授予 news 订阅。
 
 ---
 
 ## 9. 推荐执行顺序
 
-T1-1 ~ T1-4、T3-1 ~ T3-3、T2-1、T0-1 已完成，剩余只有一条：
+P1 清单已全部完成（T1-1 ~ T1-4、T2-1、T3-1 ~ T3-3、T4-1，加上可选 P0 的 T0-1）。**没有待做的 ticket 了。**
 
-1. **T4-1 新闻流 / 提醒**：最后做。价格提醒用前端 localStorage，不依赖 Alpaca 不存在的 alert API；新闻流先做后端聚合 + 15 分钟缓存。
-
-另外 **T0-2（铁鹰 / 信用价差）仍然没做**，也是剩余风险最高的一项：mleg 的 `limit_price` 在 credit 下是负数，必须先实测确认方向，否则会把 debit 做成 credit。
+唯一仍开放的是 **T0-2（铁鹰 / 信用价差）**，属可选 P0、风险最高的一项：mleg 的 `limit_price` 在 credit 下是负数，必须先实测确认方向，否则会把 debit 做成 credit。没有把握就别做。
 
 **可选的小尾巴**
 
-2026-11-04 已全部完成：ATM 合约日线图（1M/3M/6M）、完整链自动滚到 ATM、`open_interest` 归一化 + 完整链「持仓量」列、已实现盈亏 30 天 / 90 天 / 1 年 / 2 年切换。暂时没有剩余尾巴，下一步只剩 T4-1。
+2026-11-04 已全部完成：ATM 合约日线图（1M/3M/6M）、完整链自动滚到 ATM、`open_interest` 归一化 + 完整链「持仓量」列、已实现盈亏 30 天 / 90 天 / 1 年 / 2 年切换。
+
+2026-11-05 新增待办视角：`docs/` 里的截图停留在 11-04，不含加密实时徽标、账户配置/已实现盈亏卡片、备兑看涨与保护性看跌、价格提醒弹窗与新新闻提示。
 
 ---
 
 ## 10. 当前已验证的 P0 基线（不要重做）
 
 - 期权单腿/多腿纸面订单：提交 → 撤单成功
-- 期权策略台：6 个策略、收益图、最大盈亏、盈亏平衡
+- 期权策略台：8 个策略（含备兑看涨 / 保护性看跌）、收益图、最大盈亏、盈亏平衡
+- 价格提醒：localStorage 规则、全局 60 秒检查、Toast + 可选系统通知、刷新后保留
+- 新新闻提示：个股页提示条 + 自选页计数弹窗，均为增量计数、不自动刷新列表
 - 期权持仓 / 平仓 / 行权 / DNE 接口
 - 加密页 + 10 个交易对 + K 线 + 纸面下单 + 持仓/订单
 - 股票/期权/加密统一订单页与组合页

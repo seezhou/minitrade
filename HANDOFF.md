@@ -56,11 +56,15 @@ static/
   js/router.js     hash 路由
   js/theme.js      主题切换与 localStorage 持久化
   js/options-strategy.js  期权策略台、收益图、期权持仓
-  js/components/   search / trade-ticket / watch-star
+  js/news.js       新闻增量监控：多页面合并成一次 REST 轮询，只出计数不刷新列表
+  js/alert-rules.js  价格提醒纯规则（零依赖，node --test 覆盖）
+  js/alerts.js     提醒存储（localStorage）与全局触发检查
+  js/components/   search / trade-ticket / watch-star / price-alerts
   js/pages/        market / crypto / stock / watchlist / portfolio / orders / account / data
 
 tests/
   js/payoff.test.mjs         期权收益曲线与每股正股需求（node --test）
+  js/alert-rules.test.mjs    价格提醒触发谓词与文案（node --test）
   conftest.py      离线夹具：拦截真实网络、清理 TTL 缓存、假上游、TestClient
   test_orders_validation.py   订单校验规则（纯函数 + 卖出可卖量）
   test_realized_pnl.py        已实现盈亏平均成本推导 + 路由串联
@@ -122,8 +126,17 @@ tests/
 - 行情走 `/v1beta3/crypto/us/snapshots`、`/bars`；支持 10 个交易对。
 - 订单走标准 `/v2/orders`，`symbol=BTC/USD`，支持 market/limit/stop_limit、GTC/IOC、qty/notional。
 - Alpaca 对加密订单有最低金额约束（约 $10）；前后端都做校验。
-- 加密页每 15 秒刷新快照、30 秒刷新 K 线；持仓/订单复用账户状态刷新。
+- 加密页走 `/ws/crypto` 实时流：进程内只保持一条上游连接，按浏览器订阅计数增删，断线指数退避重连，服务端合并后批量下发 tick；15 秒快照 + 30 秒 K 线轮询只作兜底。持仓/订单复用账户状态刷新。
 - 24/7 页面不套用美股盘前/盘后阴影。
+
+### 新闻与价格提醒
+
+- **新闻流不可用**：`wss://stream.data.alpaca.markets/v1beta1/news` 在本账户认证、订阅都返回成功，但 120 秒零推送（同时刻 REST 有新闻）。因此 `static/js/news.js` 走 **`/api/news` 60 秒增量轮询**，不是 websocket。
+- `newsWatch` 是模块级单例：多个页面注册符号后**合并为一次请求**；用 `seen` 集合记住已见新闻 id，新 id 只累计计数，**从不自动刷新列表**。页面卸载即退订，无订阅时停止轮询。
+- 个股页「新闻」标签出现「N 条新新闻 + 最新标题」提示条，点击才重新拉取（带 `content=true`，展开全文仍可用）；自选页页头是「N 条新新闻」按钮，点开 Modal 列待读头条，关闭清零。
+- 价格提醒纯前端：规则存 `localStorage` 的 `minitrade-price-alerts`（Alpaca 没有 alert API，也没有后端参与），`App()` 里挂一次 `usePriceAlerts()`，**任何页面**打开时都会检查。
+- 检查节奏 60 秒，只对还有等待中规则的符号请求 `/api/quotes`（延迟约 15 分钟行情）；命中后写 `triggered_at` 保证只提醒一次，同时发 Toast 和可选的系统通知（`minitrade-alerts-notify` 开关）。
+- 触发判断集中在 `static/js/alert-rules.js`：`above` 用 `>=`、`below` 用 `<=`，边界值算触发；没有报价的符号跳过而不是当作触发。
 
 ### 自选 / 账户
 
@@ -207,7 +220,7 @@ python -m pip install -r requirements.txt
 python -m pip install -r requirements-dev.txt   # 仅测试用：pytest + httpx
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 python -m pytest                                 # 后端离线回归，约 1 秒
-node --test "tests/js/*.test.mjs"                 # 前端纯逻辑（收益曲线），零依赖
+node --test "tests/js/*.test.mjs"                 # 前端纯逻辑（收益曲线 / 提醒规则），零依赖
 python test_alpaca_connection.py                 # 手工连通性检查
 ```
 
@@ -254,6 +267,8 @@ python test_alpaca_connection.py                 # 手工连通性检查
 13. **完整链行数多**：`chain?full=true` 一次可能返回 80–100 行/侧（AAPL 近月 158 个合约），靠 `.option-scroll` 的 440px 高度滚动（已做 ATM 自动居中）；不要去掉 `max-height`，否则会把页面撑爆。
 14. **已实现盈亏是推导值**：Alpaca 的 activities 没有成本基准字段，`/api/account/realized-pnl` 用平均成本法从 FILL 推导，按月切窗（每窗 page_size=100），不含手续费与税费；卖单在窗口内找不到对应买入时返回 `null` + `reason`，不要改成猜测值。逐笔流水仍以 `/api/activities` 为准。
 15. **期权页窗口缩小后横向溢出**：在宽屏打开期权页再缩到移动宽度，`main.content` 的 `scrollWidth` 会停在约 979px（`documentElement` 多出约 589px），再触发 `resize` 也不恢复；直接以 390px 打开则正常（0 溢出）。属既有行为，与策略台无关，尚未定位到具体元素。
+16. **新闻流没有权限**：`wss://stream.data.alpaca.markets/v1beta1/news` 认证/订阅成功但不推送数据，功能改为 `/api/news` 的 60 秒增量轮询（详见「新闻与价格提醒」）。要恢复实时流得先确认账户是否被授予 news 订阅。
+17. **价格提醒依赖延迟行情**：`/api/quotes` 约延迟 15 分钟，且只在页面打开时检查（切到后台会跳过轮询），不能当作实时止损工具。
 
 ## 安全边界
 
