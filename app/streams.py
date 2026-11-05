@@ -27,6 +27,13 @@ from .config import (
     credentials,
     valid_symbol,
 )
+from .stream_logic import (
+    clean_symbols,
+    new_trades,
+    next_backoff,
+    plan_market_subscriptions,
+    success_message,
+)
 
 log = logging.getLogger("minitrade.streams")
 router = APIRouter()
@@ -34,6 +41,12 @@ router = APIRouter()
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _market_symbol(value: Any) -> str | None:
+    """Canonical stock symbol for the stream, or None when it is not tradable."""
+    symbol = str(value or "").strip().upper()
+    return symbol if valid_symbol(symbol) else None
 
 
 @dataclass
@@ -85,12 +98,7 @@ class MarketHub:
                     self._release(symbol)
 
     def update_client(self, client_id: int, symbols: list[str], focus: str | None = None) -> None:
-        cleaned = []
-        for symbol in symbols:
-            symbol = (symbol or "").strip().upper()
-            if valid_symbol(symbol) and symbol not in cleaned:
-                cleaned.append(symbol)
-        cleaned = cleaned[:MAX_STREAM_SYMBOLS]
+        cleaned = clean_symbols(symbols, _market_symbol, MAX_STREAM_SYMBOLS)
         with self._lock:
             client = self._clients.get(client_id)
             if not client:
@@ -103,8 +111,7 @@ class MarketHub:
                 self._refs[symbol] += 1
             client.symbols = target
             if focus is not None:
-                focus = focus.strip().upper()
-                client.focus = focus if valid_symbol(focus) else None
+                client.focus = _market_symbol(focus)
                 if client.focus:
                     trades = self._trades.get(client.focus)
                     client.last_trade_seq = trades[-1]["seq"] if trades else 0
@@ -248,13 +255,11 @@ class MarketHub:
                 continue
             with self._lock:
                 ticks = {symbol: dict(self._latest.get(symbol) or {}) for symbol in symbols if self._latest.get(symbol)}
-                trades = []
+                trades: list[dict] = []
                 if client.focus:
-                    bucket = self._trades.get(client.focus) or deque()
-                    fresh = [item for item in bucket if item["seq"] > client.last_trade_seq]
-                    if fresh:
-                        trades = fresh[-20:]
-                        client.last_trade_seq = fresh[-1]["seq"]
+                    trades, client.last_trade_seq = new_trades(
+                        self._trades.get(client.focus), client.last_trade_seq
+                    )
             if not ticks and not trades:
                 continue
             payload = {"type": "ticks", "at": _now(), "ticks": ticks}
@@ -315,37 +320,16 @@ class _MarketUpstream(threading.Thread):
         ws.send(json.dumps(payload))
 
     def _sync_subscriptions(self, ws) -> None:
-        desired = self.hub.desired_symbols()
-        focus = self.hub.focus_symbols() & desired
-        add_trades = desired - self._trades
-        remove_trades = self._trades - desired
-        add_quotes = focus - self._quotes
-        remove_quotes = self._quotes - focus
-        add_bars = focus - self._bars
-        remove_bars = self._bars - focus
-
-        if add_trades:
-            self._send(ws, {"action": "subscribe", "trades": sorted(add_trades)})
-        if add_quotes or add_bars:
-            payload = {"action": "subscribe"}
-            if add_quotes:
-                payload["quotes"] = sorted(add_quotes)
-            if add_bars:
-                payload["bars"] = sorted(add_bars)
+        actions, state = plan_market_subscriptions(
+            self.hub.desired_symbols(),
+            self.hub.focus_symbols(),
+            {"trades": self._trades, "quotes": self._quotes, "bars": self._bars},
+        )
+        for payload in actions:
             self._send(ws, payload)
-        if remove_trades:
-            self._send(ws, {"action": "unsubscribe", "trades": sorted(remove_trades)})
-        if remove_quotes or remove_bars:
-            payload = {"action": "unsubscribe"}
-            if remove_quotes:
-                payload["quotes"] = sorted(remove_quotes)
-            if remove_bars:
-                payload["bars"] = sorted(remove_bars)
-            self._send(ws, payload)
-
-        self._trades = desired
-        self._quotes = focus
-        self._bars = focus
+        self._trades = state["trades"]
+        self._quotes = state["quotes"]
+        self._bars = state["bars"]
 
     def run(self) -> None:
         from websockets.sync.client import connect
@@ -358,7 +342,7 @@ class _MarketUpstream(threading.Thread):
                 with connect(MARKET_STREAM_URL, open_timeout=15, close_timeout=5, max_size=16 * 1024 * 1024, ping_interval=20) as ws:
                     self._send(ws, {"action": "auth", "key": key, "secret": secret})
                     first = json.loads(ws.recv(timeout=15))
-                    if not _success(first):
+                    if not success_message(first):
                         raise RuntimeError("Alpaca 实时行情认证失败")
                     self._trades = set()
                     self._quotes = set()
@@ -395,21 +379,9 @@ class _MarketUpstream(threading.Thread):
             except Exception as exc:
                 log.warning("market stream disconnected: %s", exc)
                 self.hub.set_status("reconnecting", "实时行情连接中断，正在重连…")
-                if self._stop_event.wait(min(backoff, 20)):
+                if self._stop_event.wait(min(backoff, 20.0)):
                     break
-                backoff = min(backoff * 1.8, 20)
-
-
-def _success(message: Any) -> bool:
-    if isinstance(message, list):
-        return any(isinstance(item, dict) and item.get("T") == "success" for item in message)
-    if isinstance(message, dict):
-        if message.get("T") == "success":
-            return True
-        if message.get("stream") == "authorization":
-            data = message.get("data") or {}
-            return data.get("status") == "authorized"
-    return False
+                backoff = next_backoff(backoff, factor=1.8, cap=20.0)
 
 
 class TradeUpdateHub:
@@ -488,7 +460,7 @@ class _TradeUpstream(threading.Thread):
                 self.hub.set_status("connecting", "正在连接订单更新流…")
                 with connect(TRADE_STREAM_URL, open_timeout=15, close_timeout=5, ping_interval=20) as ws:
                     ws.send(json.dumps({"action": "auth", "key": key, "secret": secret}))
-                    if not _success(json.loads(ws.recv(timeout=15))):
+                    if not success_message(json.loads(ws.recv(timeout=15))):
                         raise RuntimeError("订单更新流认证失败")
                     ws.send(json.dumps({"action": "listen", "data": {"streams": ["trade_updates"]}}))
                     self.hub.set_status("connected", "订单更新流已连接")
@@ -511,9 +483,9 @@ class _TradeUpstream(threading.Thread):
             except Exception as exc:
                 log.warning("trade update stream disconnected: %s", exc)
                 self.hub.set_status("reconnecting", "订单更新流中断，正在重连…")
-                if self._stop_event.wait(min(backoff, 20)):
+                if self._stop_event.wait(min(backoff, 20.0)):
                     break
-                backoff = min(backoff * 1.8, 20)
+                backoff = next_backoff(backoff, factor=1.8, cap=20.0)
 
 
 market_hub = MarketHub()

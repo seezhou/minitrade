@@ -20,6 +20,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from .alpaca_api import as_float, as_int, iso, normalize_bar
 from .config import CRYPTO_STREAM_URL, credentials
 from .crypto import CRYPTO_SYMBOLS
+from .stream_logic import (
+    clean_symbols,
+    next_backoff,
+    plan_crypto_subscriptions,
+    success_message,
+)
 
 log = logging.getLogger("minitrade.crypto_stream")
 router = APIRouter()
@@ -80,11 +86,7 @@ class CryptoHub:
                     self._release(symbol)
 
     def update_client(self, client_id: int, symbols: list[str]) -> None:
-        cleaned: list[str] = []
-        for symbol in symbols:
-            resolved = crypto_symbol(symbol)
-            if resolved and resolved not in cleaned:
-                cleaned.append(resolved)
+        cleaned = clean_symbols(symbols, crypto_symbol)
         with self._lock:
             client = self._clients.get(client_id)
             if not client:
@@ -264,16 +266,11 @@ class _CryptoUpstream(threading.Thread):
         ws.send(json.dumps(payload))
 
     def _sync_subscriptions(self, ws) -> None:
-        desired = self.hub.desired_symbols()
-        add = sorted(desired - self._subscribed)
-        remove = sorted(self._subscribed - desired)
-        if add:
-            self._send(ws, {"action": "subscribe", "trades": add, "quotes": add, "bars": add})
-        if remove:
-            self._send(ws, {"action": "unsubscribe", "trades": remove, "quotes": remove, "bars": remove})
-        if add or remove:
-            log.info("crypto subscriptions add=%s remove=%s", add, remove)
-        self._subscribed = set(desired)
+        actions, state = plan_crypto_subscriptions(self.hub.desired_symbols(), self._subscribed)
+        for payload in actions:
+            self._send(ws, payload)
+            log.info("crypto subscriptions %s=%s", payload["action"], payload.get("trades"))
+        self._subscribed = state
 
     def run(self) -> None:
         from websockets.sync.client import connect
@@ -291,7 +288,7 @@ class _CryptoUpstream(threading.Thread):
                     ping_interval=20,
                 ) as ws:
                     self._send(ws, {"action": "auth", "key": key, "secret": secret})
-                    if not _success(json.loads(ws.recv(timeout=15))):
+                    if not success_message(json.loads(ws.recv(timeout=15))):
                         raise RuntimeError("加密实时行情认证失败")
                     self._subscribed = set()
                     self.hub.set_status("connected", "加密实时行情已连接")
@@ -328,17 +325,9 @@ class _CryptoUpstream(threading.Thread):
                     break
                 log.warning("crypto stream disconnected: %s", exc)
                 self.hub.set_status("reconnecting", "加密实时行情中断，正在重连…")
-                if self._stop_event.wait(min(backoff, 30)):
+                if self._stop_event.wait(min(backoff, 30.0)):
                     break
-                backoff = min(backoff * 2, 30)
-
-
-def _success(message: Any) -> bool:
-    if isinstance(message, list):
-        return any(isinstance(item, dict) and item.get("T") == "success" for item in message)
-    if isinstance(message, dict):
-        return message.get("T") == "success"
-    return False
+                backoff = next_backoff(backoff, factor=2.0, cap=30.0)
 
 
 crypto_hub = CryptoHub()
