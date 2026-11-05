@@ -2,11 +2,30 @@ import { useEffect, useId, useState } from "preact/hooks";
 import { html, cls, fmt, toneClass, clamp } from "./utils.js";
 import { Icon } from "./icons.js";
 
+const LOGO_RETRIES = 2;
+const LOGO_RETRY_DELAY = 600;
+
 export function Logo({ symbol, size = "", name }) {
   const letter = (symbol || "?").slice(0, 1).toUpperCase();
   const [logoState, setLogoState] = useState("normal");
+  const [attempt, setAttempt] = useState(0);
+  const [broken, setBroken] = useState(false);
 
-  useEffect(() => { setLogoState("normal"); }, [symbol]);
+  useEffect(() => {
+    setLogoState("normal");
+    setAttempt(0);
+    setBroken(false);
+  }, [symbol]);
+
+  // A failed logo is retried a couple of times with backoff instead of hiding for good.
+  useEffect(() => {
+    if (!broken || attempt >= LOGO_RETRIES) return undefined;
+    const timer = setTimeout(() => {
+      setBroken(false);
+      setAttempt((value) => value + 1);
+    }, LOGO_RETRY_DELAY * (attempt + 1));
+    return () => clearTimeout(timer);
+  }, [broken, attempt]);
 
   const classify = (event) => {
     const img = event.currentTarget;
@@ -37,27 +56,38 @@ export function Logo({ symbol, size = "", name }) {
       }
       const total = edge * edge;
       if (visible < 12) {
+        // Nothing was drawn at all: fall back to the letter tile.
         setLogoState("hidden");
-      } else if (light / visible > 0.78 && contrast / visible < 0.28) {
+      } else if (light / visible > 0.9 && contrast / visible < 0.02) {
+        // A blank, near-uniform white asset carries no mark either.
+        setLogoState("hidden");
+      } else if (transparent / total > 0.25 && light / visible > 0.78 && contrast / visible < 0.28) {
         // White-on-transparent brand marks disappear on a light logo tile.
-        setLogoState(transparent / total > 0.25 ? "inverted" : "hidden");
+        // Logos that ship their own light background stay untouched: the mark is
+        // visible on the white tile even when it only covers a small area.
+        setLogoState("inverted");
       }
     } catch {
       // Canvas can fail for exotic formats; the original image is still usable.
     }
   };
 
+  const imgClass = logoState === "inverted"
+    ? "logo-inverted"
+    : logoState === "hidden" || (broken && attempt >= LOGO_RETRIES) ? "logo-hidden" : "";
+  const src = `/api/stocks/${encodeURIComponent(symbol || "")}/logo${attempt ? `?v=${attempt}` : ""}`;
+
   return html`<span class=${cls("logo", size)} title=${name || symbol || ""}>
     <b>${letter}</b>
     <img
-      key=${symbol}
-      class=${logoState === "inverted" ? "logo-inverted" : logoState === "hidden" ? "logo-hidden" : ""}
-      src=${`/api/stocks/${encodeURIComponent(symbol || "")}/logo`}
+      key=${`${symbol}:${attempt}`}
+      class=${imgClass}
+      src=${src}
       alt=${symbol || ""}
       loading="lazy"
       referrerpolicy="no-referrer"
       onLoad=${classify}
-      onError=${(event) => { event.currentTarget.style.display = "none"; }}
+      onError=${() => setBroken(true)}
     />
   </span>`;
 }

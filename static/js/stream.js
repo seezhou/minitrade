@@ -267,3 +267,161 @@ export function useOrderUpdates(handler) {
   }, []);
   return status;
 }
+
+class CryptoStream {
+  constructor() {
+    this.ws = null;
+    this.subs = new Map();
+    this.retry = 0;
+    this.timer = null;
+    this.syncTimer = null;
+    this.status = { state: "idle", message: "加密实时流尚未连接" };
+    this.listeners = { ticks: new Set(), status: new Set() };
+    this.lastPayload = "";
+    this.manualClose = false;
+  }
+
+  on(event, callback) {
+    this.listeners[event].add(callback);
+    return () => this.listeners[event].delete(callback);
+  }
+
+  emit(event, payload) {
+    for (const callback of this.listeners[event]) callback(payload);
+  }
+
+  setStatus(status) {
+    this.status = { ...this.status, ...status };
+    this.emit("status", this.status);
+  }
+
+  ensure() {
+    if (this.ws) return;
+    this.manualClose = false;
+    this.connect();
+  }
+
+  connect() {
+    clearTimeout(this.timer);
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    let socket;
+    try {
+      socket = new WebSocket(`${protocol}//${location.host}/ws/crypto`);
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    this.ws = socket;
+    socket.onopen = () => {
+      this.retry = 0;
+      this.lastPayload = "";
+      this.sync(true);
+    };
+    socket.onmessage = (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (message.type === "crypto_status") this.setStatus(message);
+      else if (message.type === "crypto" && message.ticks) this.emit("ticks", message);
+    };
+    socket.onerror = () => {
+      this.setStatus({ state: "reconnecting", message: "加密行情连接异常，正在重连…" });
+    };
+    socket.onclose = () => {
+      this.ws = null;
+      if (this.manualClose) return;
+      this.setStatus({ state: "reconnecting", message: "加密行情连接中断，正在重连…" });
+      this.scheduleReconnect();
+    };
+  }
+
+  scheduleReconnect() {
+    clearTimeout(this.timer);
+    const delay = Math.min(15000, 1000 * Math.max(1, 2 ** this.retry));
+    this.retry += 1;
+    this.timer = setTimeout(() => this.connect(), delay);
+  }
+
+  subscribe(key, symbols) {
+    this.subs.set(key, [...new Set(symbols.filter(Boolean))]);
+    this.ensure();
+    this.queueSync();
+    return () => {
+      this.subs.delete(key);
+      if (!this.subs.size && this.ws) {
+        // Closing the last subscription releases the shared upstream stream.
+        this.manualClose = true;
+        clearTimeout(this.timer);
+        try {
+          this.ws.close();
+        } catch {
+          /* ignore */
+        }
+        this.ws = null;
+        this.setStatus({ state: "idle", message: "加密实时流已释放" });
+        return;
+      }
+      this.queueSync();
+    };
+  }
+
+  queueSync() {
+    clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => this.sync(), 60);
+  }
+
+  sync(force = false) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const symbols = [...new Set([...this.subs.values()].flat())];
+    const payload = { action: "subscribe", symbols };
+    const encoded = JSON.stringify(payload);
+    if (!force && encoded === this.lastPayload) return;
+    this.lastPayload = encoded;
+    try {
+      this.ws.send(encoded);
+    } catch {
+      /* socket will reconnect */
+    }
+  }
+}
+
+export const cryptoStream = new CryptoStream();
+
+export function useCryptoLive(symbols) {
+  const listKey = symbols.filter(Boolean).join(",");
+  const keyRef = useRef(`crypto-${Math.random().toString(36).slice(2, 10)}`);
+  const symbolSetRef = useRef(new Set(symbols.filter(Boolean)));
+  symbolSetRef.current = new Set(symbols.filter(Boolean));
+  const [ticks, setTicks] = useState({});
+  const [status, setStatus] = useState(cryptoStream.status);
+
+  useEffect(() => {
+    const unsubscribe = cryptoStream.subscribe(keyRef.current, listKey ? listKey.split(",") : []);
+    return () => unsubscribe();
+  }, [listKey]);
+
+  useEffect(() => {
+    const offTicks = cryptoStream.on("ticks", (payload) => {
+      if (!payload.ticks) return;
+      setTicks((previous) => {
+        const next = { ...previous };
+        for (const [symbol, patch] of Object.entries(payload.ticks)) {
+          if (!symbolSetRef.current.has(symbol)) continue;
+          next[symbol] = { ...(next[symbol] || {}), ...patch };
+        }
+        return next;
+      });
+    });
+    const offStatus = cryptoStream.on("status", setStatus);
+    setStatus(cryptoStream.status);
+    return () => {
+      offTicks();
+      offStatus();
+    };
+  }, []);
+
+  return { ticks, status };
+}

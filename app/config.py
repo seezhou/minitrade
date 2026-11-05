@@ -16,6 +16,7 @@ PAPER_BASE = "https://paper-api.alpaca.markets"
 DATA_BASE = "https://data.alpaca.markets"
 MARKET_STREAM_URL = "wss://stream.data.alpaca.markets/v2/delayed_sip"
 TRADE_STREAM_URL = "wss://paper-api.alpaca.markets/stream"
+CRYPTO_STREAM_URL = "wss://stream.data.alpaca.markets/v1beta3/crypto/us"
 DATA_FEED = "delayed_sip"
 DATA_FEED_LABEL = "SIP 综合行情（约延迟 15 分钟）"
 

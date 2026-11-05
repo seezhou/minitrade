@@ -7,9 +7,10 @@ import { navigate } from "../router.js";
 import { Icon } from "../icons.js";
 import { PageHead, Card, Badge, Empty, ErrorBanner, LoadingRow } from "../ui.js";
 import { PriceChart } from "../charts.js";
+import { useCryptoLive } from "../stream.js";
 
 const RANGES = ["1D", "1W", "1M", "3M", "6M", "1Y"];
-const RANGE_LABEL = { "1D": "1D", "1W": "5D", "1M": "1M", "3M": "3M", "6M": "6M", "1Y": "1Y" };
+const RANGE_LABEL = { "1D": "1D", "1W": "1W", "1M": "1M", "3M": "3M", "6M": "6M", "1Y": "1Y" };
 
 function coinPrice(value) {
   const number = Number(value);
@@ -35,6 +36,7 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
     [selected, range],
     { pollMs: 30000 },
   );
+  const { ticks: liveTicks, status: liveStatus } = useCryptoLive([selected]);
   const markets = marketsQuery.data || [];
   const snapshot = snapshotQuery.data;
   const bars = barsQuery.data?.bars || [];
@@ -49,9 +51,16 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
     }
   }, [markets, selected]);
 
-  const price = snapshot?.price;
-  const change = snapshot?.change;
-  const changePct = snapshot?.change_pct;
+  const tick = liveTicks[selected] || {};
+  const livePrice = tick.price ?? tick.mid;
+  const price = livePrice ?? snapshot?.price ?? null;
+  const bid = tick.bid ?? snapshot?.bid ?? null;
+  const ask = tick.ask ?? snapshot?.ask ?? null;
+  const previousClose = snapshot?.previous_close;
+  const change = price != null && previousClose ? price - previousClose : snapshot?.change;
+  const changePct = change != null && previousClose ? change / previousClose : snapshot?.change_pct;
+  const liveConnected = liveStatus.state === "connected";
+  const ticketSnapshot = { ...(snapshot || {}), price, bid, ask, change, change_pct: changePct };
 
   return html`<div class="stack">
     <${PageHead}
@@ -76,7 +85,7 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
             <div class="crypto-symbol-id">
               <span class="crypto-mark">${selected.split("/")[0].slice(0, 1)}</span>
               <div>
-                <div class="crypto-symbol-title">${selected}<${Badge} tone="green">CRYPTO<//></div>
+                <div class="crypto-symbol-title">${selected}<${Badge} tone="green">CRYPTO<//><${Badge} tone=${liveConnected ? "green" : "neutral"}>${liveConnected ? "LIVE" : "15s 轮询"}<//></div>
                 <div class="card-sub">${snapshot?.name || "Alpaca Crypto"} · 24/7</div>
               </div>
             </div>
@@ -89,7 +98,7 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
             <div class="range-tabs">
               ${RANGES.map((key) => html`<button class=${cls(key === range && "active")} onClick=${() => setRange(key)}>${RANGE_LABEL[key]}</button>`)}
             </div>
-            <div class="chart-foot-inline">5Min · 24/7</div>
+            <div class="chart-foot-inline">${barsQuery.data?.timeframe || "5Min"} · 24/7 · ${liveConnected ? "实时" : "15s 轮询"}</div>
           </div>
           ${barsQuery.error ? html`<${ErrorBanner} message=${barsQuery.error} onRetry=${barsQuery.reload} />` : null}
           ${bars.length ? html`<${PriceChart}
@@ -99,6 +108,8 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
             indicators=${{}}
             chartType="area"
             showSessions=${false}
+            livePrice=${livePrice}
+            liveTs=${tick.ts ?? tick.quote_ts}
           />` : barsQuery.loading ? html`<div class="chart-skeleton"><span class="skeleton" /></div>` : html`<div class="chart-empty">暂无 K 线数据</div>`}
           <div class="chart-foot">
             <span>Alpaca Crypto · ${range} · ${bars.length} 根 K 线</span>
@@ -107,7 +118,7 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
         <//>
 
         <${Card} className="crypto-market-card">
-          <div class="card-head"><div><div class="card-title">加密市场</div><div class="card-sub">点击切换交易对，行情约每 15 秒刷新</div></div><${Badge} tone="green">10 PAIRS<//></div>
+          <div class="card-head"><div><div class="card-title">加密市场</div><div class="card-sub">点击切换交易对，实时行情 + 15 秒轮询兜底</div></div><${Badge} tone="green">10 PAIRS<//></div>
           <div class="card-body" style="padding-top:8px">
             <div class="crypto-table-wrap"><table class="table crypto-table">
               <thead><tr><th>交易对</th><th class="r">最新价</th><th class="r">24h</th><th class="r">买 / 卖</th><th class="r">24h 成交量</th></tr></thead>
@@ -124,7 +135,7 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
       </div>
 
       <div class="stack">
-        <${CryptoTicket} symbol=${selected} snapshot=${snapshot} onSubmitted=${() => { refreshTrading({ silent: true }); snapshotQuery.reload(); }} />
+        <${CryptoTicket} symbol=${selected} snapshot=${ticketSnapshot} onSubmitted=${() => { refreshTrading({ silent: true }); snapshotQuery.reload(); }} />
         <${Card} className="crypto-side-card">
           <div class="card-head"><div><div class="card-title">关键数据</div><div class="card-sub">${snapshot?.name || selected}</div></div></div>
           <div class="card-body" style="padding-top:8px">
@@ -133,8 +144,8 @@ export function CryptoPage({ symbol = "BTC/USD" }) {
               <div><span>24h 最高</span><b>${coinPrice(snapshot?.high)}</b></div>
               <div><span>24h 最低</span><b>${coinPrice(snapshot?.low)}</b></div>
               <div><span>24h 成交量</span><b>${fmt.compact(snapshot?.volume)}</b></div>
-              <div><span>买价</span><b>${coinPrice(snapshot?.bid)}</b></div>
-              <div><span>卖价</span><b>${coinPrice(snapshot?.ask)}</b></div>
+              <div><span>买价</span><b>${coinPrice(bid)}</b></div>
+              <div><span>卖价</span><b>${coinPrice(ask)}</b></div>
             </div>
           </div>
         <//>

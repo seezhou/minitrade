@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 import requests
@@ -13,6 +14,7 @@ from .alpaca_api import UpstreamError
 from .cache import cache
 from .config import DATA_FEED, DATA_FEED_LABEL, STATIC_DIR, credentials
 from .crypto import router as crypto_router
+from .crypto_stream import crypto_hub, router as crypto_stream_router
 from .market import router as market_router
 from .options import router as options_router
 from .streams import market_hub, router as stream_router, trade_hub
@@ -27,6 +29,7 @@ async def lifespan(app: FastAPI):
     log.info("MiniTrade starting (paper trading only, feed=%s)", DATA_FEED)
     yield
     market_hub.stop()
+    crypto_hub.stop()
     log.info("MiniTrade stopped")
 
 
@@ -44,6 +47,7 @@ app.include_router(options_router)
 app.include_router(crypto_router)
 app.include_router(trading_router)
 app.include_router(stream_router)
+app.include_router(crypto_stream_router)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -93,6 +97,28 @@ def health() -> dict:
 
 _alpaca_logo_supported: bool | None = None
 
+# A logo fetch must never hold an icon for long: connect/read timeouts are short
+# and the HTTP connections are reused per worker thread.
+LOGO_TIMEOUT = (2, 3)
+LOGO_CACHE_TTL = 6 * 3600
+LOGO_MISS_TTL = 5 * 60
+LOGO_USER_AGENT = "Mozilla/5.0 (compatible; MiniTrade/2.0; learning project)"
+
+_logo_session = threading.local()
+
+
+def _logo_http() -> requests.Session:
+    """One pooled session per thread; reuse keeps TLS handshakes off the hot path."""
+    session = getattr(_logo_session, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": LOGO_USER_AGENT})
+        adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _logo_session.session = session
+    return session
+
 
 def _image_response(content: bytes, content_type: str) -> dict | None:
     if content and content_type.startswith("image/"):
@@ -107,10 +133,10 @@ def _logo_from_alpaca(symbol: str) -> dict | None:
         return None
     try:
         key, secret = credentials()
-        result = requests.get(
+        result = _logo_http().get(
             f"https://data.alpaca.markets/v1beta1/logos/{symbol}",
             headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
-            timeout=6,
+            timeout=LOGO_TIMEOUT,
         )
     except requests.RequestException:
         return None
@@ -138,11 +164,7 @@ def _logo_from_public(symbol: str) -> dict | None:
     ]
     for url in candidates:
         try:
-            result = requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; MiniTrade/2.0; learning project)"},
-                timeout=6,
-            )
+            result = _logo_http().get(url, timeout=LOGO_TIMEOUT)
         except requests.RequestException:
             continue
         if result.status_code == 200:
@@ -163,12 +185,26 @@ def stock_logo(symbol: str):
     from .config import valid_symbol
 
     if not valid_symbol(symbol):
-        return Response(status_code=404, headers={"Cache-Control": "public, max-age=3600"})
+        return Response(status_code=404, headers={"Cache-Control": "no-store"})
 
-    record = cache.get_or_set(f"logo:{symbol}", 6 * 3600, lambda: _load_logo(symbol), stale_ttl=24 * 3600)
+    record = cache.get(f"logo:{symbol}", LOGO_CACHE_TTL)
+    if record is None:
+        if cache.get(f"logo-miss:{symbol}", LOGO_MISS_TTL):
+            record = {"missing": True}
+        else:
+            # Successful images live for hours; misses only for LOGO_MISS_TTL so a
+            # transient CDN failure is retried soon instead of pinning letter tiles.
+            loaded = _load_logo(symbol)
+            if loaded.get("missing"):
+                cache.set(f"logo-miss:{symbol}", True)
+                record = loaded
+            else:
+                record = cache.set(f"logo:{symbol}", loaded)
     if record.get("missing") or not record.get("bytes"):
         # A 404 lets the browser hide the <img>, revealing the themed CSS letter tile.
-        return Response(status_code=404, headers={"Cache-Control": "public, max-age=3600"})
+        # Failures must not be cached by the browser, and only briefly server-side:
+        # one network hiccup should not turn the whole list into letters for hours.
+        return Response(status_code=404, headers={"Cache-Control": "no-store"})
     return Response(
         content=record["bytes"],
         media_type=record.get("content_type", "image/png"),

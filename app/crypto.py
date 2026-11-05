@@ -1,6 +1,8 @@
 """Crypto market data and paper-trading routes."""
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -11,6 +13,7 @@ from .alpaca_api import UpstreamError, as_float
 from .cache import cache
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger("minitrade.crypto")
 
 CRYPTO_SYMBOLS = [
     "BTC/USD",
@@ -36,10 +39,13 @@ CRYPTO_NAMES = {
     "UNI/USD": "Uniswap",
     "AAVE/USD": "Aave",
 }
+# (timeframe, lookback days). Alpaca crypto bars default to *today only* when no
+# start is sent, so the window must be explicit; the endpoint also paginates well
+# below any requested limit, so page through until next_page_token is empty.
 RANGES = {
-    "1D": ("5Min", 288),
-    "1W": ("15Min", 672),
-    "1M": ("1Hour", 744),
+    "1D": ("5Min", 1),
+    "1W": ("15Min", 7),
+    "1M": ("1Hour", 30),
     "3M": ("1Day", 90),
     "6M": ("1Day", 180),
     "1Y": ("1Day", 365),
@@ -56,6 +62,34 @@ def _crypto_or_422(symbol: str) -> str:
 def _upstream_http(exc: UpstreamError) -> HTTPException:
     code = 422 if exc.status in (400, 422) else 502
     return HTTPException(status_code=code, detail=exc.message)
+
+
+def _paged_crypto_bars(symbol: str, timeframe: str, start: str, max_pages: int = 8) -> list[dict]:
+    """Crypto bars page by a server-side window far below `limit` (~7 days of bars).
+
+    Without paging, long ranges silently return only the oldest page, which looks
+    like "1Y shows one day" in the UI. Merge pages and sort ascending by time.
+    """
+    merged: dict[str, dict] = {}
+    token: str | None = None
+    for _ in range(max_pages):
+        params: dict = {
+            "symbols": symbol,
+            "timeframe": timeframe,
+            "start": start,
+            "limit": 10000,
+        }
+        if token:
+            params["page_token"] = token
+        raw = data_get("/v1beta3/crypto/us/bars", params, timeout=20)
+        for item in (raw.get("bars") or {}).get(symbol) or []:
+            merged.setdefault(item.get("t"), item)
+        token = raw.get("next_page_token")
+        if not token:
+            break
+    if token:
+        log.warning("crypto bars paging stopped at max_pages for %s %s", symbol, timeframe)
+    return [merged[stamp] for stamp in sorted(merged, key=lambda value: value or "")]
 
 
 def _snapshot_row(symbol: str, item: dict) -> dict:
@@ -131,17 +165,13 @@ def crypto_bars(
     key = range.upper()
     if key not in RANGES:
         raise HTTPException(status_code=422, detail="不支持的加密时间区间。")
-    timeframe, limit = RANGES[key]
+    timeframe, days = RANGES[key]
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
 
     def load() -> dict:
-        raw = data_get(
-            "/v1beta3/crypto/us/bars",
-            {"symbols": symbol, "timeframe": timeframe, "limit": limit},
-            timeout=20,
-        )
-        bars = (raw.get("bars") or {}).get(symbol) or []
+        raw_rows = _paged_crypto_bars(symbol, timeframe, start)
         rows = []
-        for item in bars:
+        for item in raw_rows:
             row = normalize_bar(item, symbol=symbol)
             row["volume"] = as_float(item.get("v")) or 0
             rows.append(row)
@@ -149,11 +179,13 @@ def crypto_bars(
             "symbol": symbol,
             "range": key,
             "timeframe": timeframe,
+            "start": start,
             "bars": rows,
         }
 
+    ttl = 20 if key == "1D" else 120
     try:
-        return cache.get_or_set(f"crypto:bars:{symbol}:{key}", 20, load, stale_ttl=180)
+        return cache.get_or_set(f"crypto:bars:{symbol}:{key}", ttl, load, stale_ttl=600)
     except UpstreamError as exc:
         raise _upstream_http(exc) from None
 
