@@ -39,6 +39,8 @@ app/
   crypto.py        加密行情、K 线、订单、持仓
   trading.py       账户、账户配置、组合历史、持仓、订单（含 OCO/OTO/client id）、已实现盈亏、活动、自选
   streams.py       行情聚合 hub + 订单更新 hub + 两个 WebSocket 路由
+  crypto_stream.py 加密行情 hub（单条上游连接、订阅引用计数、批量下发）
+  stream_logic.py  实时流纯函数：差量订阅计划、重连退避、符号清洗、成交窗口
 
 static/
   index.html       import map 指向 /static/vendor
@@ -67,6 +69,8 @@ tests/
   js/alert-rules.test.mjs    价格提醒触发谓词与文案（node --test）
   conftest.py      离线夹具：拦截真实网络、清理 TTL 缓存、假上游、TestClient
   test_orders_validation.py   订单校验规则（纯函数 + 卖出可卖量）
+  test_options_orders.py      期权下单 payload（单腿 ticket / mleg 组合 / OCC 解析）
+  test_stream_logic.py        实时流纯逻辑（差量订阅 / 退避 / 符号清洗 / 成交窗口）
   test_realized_pnl.py        已实现盈亏平均成本推导 + 路由串联
   test_paging.py              加密 / 股票 bars 的 next_page_token 翻页合并
   test_normalize.py           bar / order / position / account / news 字段归一化
@@ -92,6 +96,7 @@ tests/
 - 1D 从纽约时间当天 04:00 开始，包含盘前/盘后；图表用 markArea 标灰。
 - 快照 `dailyBar` 盘中可能仍是上一交易日，因此个股页用 1D 分钟线推导 **今日开盘/最高/最低/成交量/VWAP**（`_today_session_stats`），并在界面标注“截至 … ET”。
 - 当前行情流：所有符号只订阅 `trades`；聚焦符号额外订阅 `quotes` 和 `bars`，避免超过 Alpaca 订阅数量限制。
+- 订阅差量、重连退避、符号清洗、成交窗口都抽在 `app/stream_logic.py`（纯函数，无 socket/线程/asyncio）：`plan_market_subscriptions` 只发真正变化的 channel，`next_backoff` 统一几何退避，`new_trades` 控制重放窗口。改这几个决策**不必连上游**，`tests/test_stream_logic.py` 直接覆盖；hub 线程只负责 I/O。
 - 服务端按 ~400ms 合并 tick 后批量下发；浏览器端再按订阅过滤合并。
 - 个股 K 线：最后一根当前交易日的 K 线会按约 1 秒节流，用实时成交价更新 close/high/low；K 线重绘时保留用户当前的 dataZoom 缩放/平移状态（`PriceChart` 的 `preserveZoomKey`）。
 - 历史逐笔 / 历史报价：`/api/stocks/{symbol}/trades` 与 `/api/stocks/{symbol}/quotes?limit=` 走 `/v2/stocks/trades|quotes`，**强制 `feed=iex`、`sort=desc`、缓存 30 秒**。当前订阅没有实时 SIP，IEX 数据不是 consolidated SIP，页面必须保留“非 consolidated SIP”说明。
@@ -269,6 +274,8 @@ python test_alpaca_connection.py                 # 手工连通性检查
 15. **期权页窗口缩小后横向溢出**：在宽屏打开期权页再缩到移动宽度，`main.content` 的 `scrollWidth` 会停在约 979px（`documentElement` 多出约 589px），再触发 `resize` 也不恢复；直接以 390px 打开则正常（0 溢出）。属既有行为，与策略台无关，尚未定位到具体元素。
 16. **新闻流没有权限**：`wss://stream.data.alpaca.markets/v1beta1/news` 认证/订阅成功但不推送数据，功能改为 `/api/news` 的 60 秒增量轮询（详见「新闻与价格提醒」）。要恢复实时流得先确认账户是否被授予 news 订阅。
 17. **价格提醒依赖延迟行情**：`/api/quotes` 约延迟 15 分钟，且只在页面打开时检查（切到后台会跳过轮询），不能当作实时止损工具。
+18. **期权 credit 组合表达不了**：`OptionOrderInput.limit_price` 是 `gt=0`，而 mleg 的 credit 净价必须是负数，请求在 pydantic 层就被拒（`tests/test_options_orders.py::test_credit_combo_cannot_be_expressed_yet` 记录了这个现状）。做铁鹰/信用价差前必须放开该约束，并同步改前端 `Math.max(0.01, netMid)` 与 `isCredit`（现按买卖腿数求和判定，铁鹰会得 0 而被当成 debit）。
+19. **带点号的股票期权下单会被拒**：Alpaca 的 OCC root 去点（`BRKB261120C00200000`），但 URL symbol 保留点（`BRK.B`），root 比较直接 422。修它需要 root→symbol 映射，目前无解，涉及 `BRK.B` / `BF-B` 的期权。
 
 ## 安全边界
 

@@ -155,7 +155,7 @@ Invoke-WebRequest http://127.0.0.1:8000/api/health -UseBasicParsing
 
 `tests/` 是离线回归套件（pytest），装依赖用 `pip install -r requirements-dev.txt`。
 
-- 只测**我们写的逻辑**：订单校验、已实现盈亏推导、翻页合并、字段归一化、路由串联。
+- 只测**我们写的逻辑**：订单校验、期权下单 payload（单腿 ticket / mleg 组合 / OCC 解析）、实时流纯逻辑（差量订阅 / 退避 / 符号清洗 / 成交窗口）、已实现盈亏推导、翻页合并、字段归一化、路由串联。当前 182 例 + 前端 31 例。
 - 不由测试断言 Alpaca 的实时价格 / 合约数量 / 新闻条数；真实连通性仍靠 `python test_alpaca_connection.py` 手工跑。
 - `tests/conftest.py` 把 `requests.Session.request` 全部拦死：任何忘记 mock 的上游调用会直接 AssertionError，不会偷偷联网下单。
 - 改 `_validate_order` / `normalize_*` / `_paged_*` / `_derive_realized` 或对应路由后，先跑 pytest 再启服务。
@@ -786,6 +786,8 @@ Ticket:
 16. **测试**：`tests/` 的假上游按 Alpaca **字段名**构造，改归一化字段时同步改 `test_normalize.py`，否则测试会和真实返回一起腐烂。不要在测试里断言实时数值。
 17. **期权 credit 符号**：备兑看涨这类 credit 策略的 `netMid` 是负数，但界面显示和**单腿** `limit_price` 必须用绝对值；只有 payoff 的现金流方向由 `credit` 控制。带符号净价只适用于 mleg 组合单，别混到单腿。
 18. **新闻流没有权限**：`wss://stream.data.alpaca.markets/v1beta1/news` 在本账户认证/订阅都成功但**不推送数据**（REST 同时有新闻）。别再花时间重试 websocket，`news.js` 走的是 `/api/news` 的 60 秒增量轮询。要恢复实时流，先确认账户是否被授予 news 订阅。
+19. **期权 credit 组合被 schema 挡住**：`OptionOrderInput.limit_price` 是 `gt=0`，mleg 的 credit 净价必须为负，所以铁鹰/信用价差**连请求都构造不出来**。做 T0-2 先放开这个字段，再改前端 `Math.max(0.01, netMid)` 和 `isCredit`（现按腿的买卖数求和判定，铁鹰 = 0 → 误判成 debit）。`test_options_orders.py` 里有专门用例记录现状，改完后把那条断言反过来写。
+20. **带点号标的的期权下单会被拒**：OCC root 去点（`BRKB`）而 URL symbol 保留点（`BRK.B`），root 比较直接 422；`test_options_orders.py` 记录了当前行为。
 
 ---
 
