@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "./api.js";
+import { payoffCurve, requiredShares } from "./payoff.js";
 import { html, cls, fmt, toneClass } from "./utils.js";
 import { notify, refreshTrading, useStore } from "./store.js";
 import { Badge } from "./ui.js";
@@ -35,6 +36,20 @@ const STRATEGIES = {
     label: "买入宽跨式",
     desc: "买入虚值 Call + 虚值 Put，等待大波动",
     legs: [{ kind: "call", side: "buy", offset: 2 }, { kind: "put", side: "buy", offset: -2 }],
+  },
+  // The two `stock` strategies carry a share leg that is NOT part of the order:
+  // you must already own 100 shares per contract, and only the option leg is sent.
+  covered_call: {
+    label: "备兑看涨",
+    desc: "持有 100 股 + 卖出 Call，收权利金、封顶上方收益",
+    stock: "long",
+    legs: [{ kind: "call", side: "sell", offset: 2 }],
+  },
+  protective_put: {
+    label: "保护性看跌",
+    desc: "持有 100 股 + 买入 Put，为下跌买保险",
+    stock: "long",
+    legs: [{ kind: "put", side: "buy", offset: -2 }],
   },
 };
 
@@ -78,10 +93,27 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
   const [priceTouched, setPriceTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const store = useStore();
   const calls = chain?.calls || [];
   const puts = chain?.puts || [];
   const def = STRATEGIES[strategy] || STRATEGIES.long_call;
   const canMarket = def.legs.length === 1;
+  // A covered call receives premium; every other strategy on this desk pays it.
+  const isCredit = def.legs.reduce((sum, leg) => sum + (leg.side === "buy" ? 1 : -1), 0) < 0;
+  const unboundedProfit = ["long_call", "long_straddle", "long_strangle", "protective_put"].includes(strategy);
+
+  const stockPosition = useMemo(() => {
+    const row = store.positions.find((item) => (
+      item.symbol === symbol && item.asset_class !== "us_option" && !optionRoot(item.symbol)
+    ));
+    if (!row) return { qty: 0, basis: null };
+    return { qty: Number(row.qty) || 0, basis: Number(row.avg_entry_price) || null };
+  }, [store.positions, symbol]);
+
+  // Covered strategies need 100 shares per contract; those shares are never part of the order.
+  const shareTarget = def.stock ? requiredShares(qty) : 0;
+  const missingShares = Math.max(0, shareTarget - stockPosition.qty);
+  const stockBlocked = missingShares > 0;
 
   const defaults = useMemo(
     () => defaultStrikes(strategy, calls, puts, spot || chain?.spot),
@@ -113,54 +145,40 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
   useEffect(() => {
     if (priceTouched) return;
     if (calls.length || puts.length) {
-      setLimitPrice(Math.max(0.01, Number(netMid || 0)).toFixed(2));
+      // The premium is always shown as a positive per-share price; the debit/credit
+      // direction is carried separately, so a credit ticket must not clamp to 0.01.
+      setLimitPrice(Math.max(0.01, Math.abs(Number(netMid || 0))).toFixed(2));
     }
   }, [netMid, priceTouched, calls.length, puts.length]);
 
-  const entry = orderType === "market" ? netMid : Number(limitPrice) || 0;
+  const entry = orderType === "market" ? Math.abs(netMid) : Number(limitPrice) || 0;
   const payoff = useMemo(() => {
-    const center = Number(spot || chain?.spot) || 0;
-    if (!center || !legs.length) return { points: [], maxProfit: null, maxLoss: null, breakevens: [] };
-    const low = center * 0.6;
-    const high = center * 1.4;
-    const step = (high - low) / 120;
-    const points = [];
-    for (let price = low; price <= high + step / 2; price += step) {
-      let value = -entry * 100 * qty;
-      for (const leg of legs) {
-        if (!leg.contract) continue;
-        const strike = Number(leg.contract.strike);
-        const intrinsic = leg.kind === "call" ? Math.max(0, price - strike) : Math.max(0, strike - price);
-        value += (leg.side === "buy" ? 1 : -1) * intrinsic * 100 * qty;
-      }
-      points.push({ price, value });
-    }
-    const values = points.map((point) => point.value);
-    const breakevens = [];
-    for (let i = 1; i < points.length; i += 1) {
-      const previous = points[i - 1];
-      const current = points[i];
-      if ((previous.value < 0 && current.value >= 0) || (previous.value > 0 && current.value <= 0)) {
-        const ratio = Math.abs(previous.value) / (Math.abs(previous.value) + Math.abs(current.value) || 1);
-        breakevens.push(previous.price + (current.price - previous.price) * ratio);
-      }
-    }
-    const unlimited = ["long_call", "long_straddle", "long_strangle"].includes(strategy);
-    return {
-      points,
-      maxProfit: unlimited ? null : Math.max(...values),
-      maxLoss: Math.min(...values),
-      breakevens,
-    };
-  }, [legs, entry, qty, spot, chain?.spot, strategy]);
+    const priced = legs
+      .filter((leg) => leg.contract)
+      .map((leg) => ({ kind: leg.kind, side: leg.side, strike: Number(leg.contract.strike) }));
+    return payoffCurve({
+      legs: priced,
+      entry,
+      qty,
+      spot: Number(spot || chain?.spot) || 0,
+      // Covered strategies draw the share leg into the chart; it is not an order leg.
+      shares: def.stock ? stockPosition.qty : 0,
+      basis: stockPosition.basis,
+      credit: isCredit,
+      unbounded: unboundedProfit,
+    });
+  }, [legs, entry, qty, spot, chain?.spot, stockPosition.qty, stockPosition.basis, isCredit, unboundedProfit, def.stock]);
 
   async function submit() {
     setError("");
     if (!legs.length || legs.some((leg) => !leg.contract)) return setError("当前到期日没有可用的期权合约。");
     if (!Number.isInteger(Number(qty)) || Number(qty) <= 0) return setError("合约数需要为正整数。");
     if (orderType === "limit" && (!entry || entry <= 0)) return setError("请输入有效的净限价。");
+    if (stockBlocked) return setError(`正股不足：需要 ${shareTarget} 股 ${symbol}，当前持有 ${stockPosition.qty} 股。`);
     const summary = legs.map((leg) => `${leg.side === "buy" ? "买" : "卖"} ${leg.contract.symbol}`).join(" / ");
-    if (!confirm(`${def.label}\n${summary}\n${qty} 组，${orderType === "limit" ? `净限价 $${entry.toFixed(2)}` : "市价"}。\n\n确认发送到 Alpaca 纸面账户？`)) return;
+    const stockLine = def.stock ? `\n正股 ${symbol}：持有 ${stockPosition.qty} 股 / 需要 ${shareTarget} 股（不计入本次订单）` : "";
+    const priceLine = `${def.legs.length > 1 ? "净限价" : "限价"} $${entry.toFixed(2)}`;
+    if (!confirm(`${def.label}\n${summary}${stockLine}\n${qty} 组，${orderType === "limit" ? priceLine : "市价"}。\n\n确认发送到 Alpaca 纸面账户？`)) return;
     setBusy(true);
     try {
       const payload = {
@@ -191,7 +209,7 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
         <div class="card-title">期权策略台 <${Badge} tone="blue">LEVEL 3<//></div>
         <div class="card-sub">${def.desc} · 到期 ${expiry} · 现价 ${fmt.price(spot || chain?.spot)}</div>
       </div>
-      <div class="text-right text-xs text-muted">账户期权等级 3<br />多腿按组合限价提交</div>
+      <div class="text-right text-xs text-muted">账户期权等级 3<br />${def.stock ? "正股腿不计入订单" : "多腿按组合限价提交"}</div>
     </div>
 
     <div class="strategy-controls" style="margin-top:12px">
@@ -213,7 +231,7 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
         </select>
       </div>
       <div class="field">
-        <label>净限价（每股）</label>
+        <label>${def.legs.length > 1 ? "净限价（每股）" : "限价（每股）"}</label>
         <div class="input-wrap">
           <input class="input" type="number" min="0.01" step="0.01" value=${limitPrice} disabled=${orderType === "market"} onInput=${(event) => { setPriceTouched(true); setLimitPrice(event.currentTarget.value); }} />
           <span class="input-suffix">USD</span>
@@ -233,9 +251,18 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
       </div>`)}
     </div>
 
+    ${def.stock ? html`<div class="text-sm" style="margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
+      <span class="text-muted">正股腿</span>
+      <span>持有 <b>${fmt.num(stockPosition.qty, 4)}</b> 股 ${symbol}</span>
+      <span>需要 <b>${fmt.num(shareTarget, 0)}</b> 股（${qty} 张 × 100）</span>
+      ${stockPosition.basis ? html`<span class="text-muted">成本 ${fmt.price(stockPosition.basis)}</span>` : null}
+      ${stockBlocked ? html`<span class="negative">还差 ${fmt.num(missingShares, 0)} 股</span>` : html`<span class="positive">正股已覆盖</span>`}
+    </div>` : null}
+    ${stockBlocked ? html`<div class="error-banner" style="margin-top:8px">正股不足：${def.label} 每张合约需要 100 股 ${symbol}，当前只有 ${fmt.num(stockPosition.qty, 4)} 股。请先买入正股，或改用不依赖正股的策略。</div>` : null}
+
     <div class="strategy-summary" style="margin-top:10px">
-      <div class="metric"><span>净权利金</span><strong>${netMid > 0 ? fmt.money(netMid * 100 * qty) : fmt.money(netMid * 100 * qty)}</strong><small>${netMid >= 0 ? "净支出" : "净收入"} · ${qty} 组</small></div>
-      <div class="metric"><span>最大亏损</span><strong class="negative">${payoff.maxLoss != null ? fmt.money(payoff.maxLoss) : "—"}</strong><small>按当前净限价估算</small></div>
+      <div class="metric"><span>净权利金</span><strong>${fmt.money(Math.abs(netMid) * 100 * qty)}</strong><small>${netMid >= 0 ? "净支出" : "净收入"} · ${qty} 组</small></div>
+      <div class="metric"><span>最大亏损</span><strong class="negative">${payoff.maxLoss != null ? fmt.money(payoff.maxLoss) : "—"}</strong><small>${def.stock ? "含正股腿、按当前限价估算" : "按当前净限价估算"}</small></div>
       <div class="metric"><span>最大收益</span><strong class="positive">${payoff.maxProfit != null ? fmt.money(payoff.maxProfit) : "无限"}</strong><small>到期日、未计费用</small></div>
       <div class="metric"><span>盈亏平衡</span><strong>${payoff.breakevens.length ? payoff.breakevens.map((value) => fmt.price(value)).join(" / ") : "—"}</strong><small>标的价格</small></div>
     </div>
@@ -243,9 +270,11 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
     <div class="grid-2" style="gap:12px;margin-top:12px;align-items:stretch">
       <div class="payoff-wrap"><${PayoffChart} data=${payoff.points} spot=${spot || chain?.spot} entry=${entry} /></div>
       <div class="stack" style="gap:8px">
-        <div class="modal-note">多腿期权会以一条 mleg 组合单发送；只有全部腿一起成交，避免裸腿风险。期权交易风险高，仅用于学习。</div>
+        <div class="modal-note">${def.stock
+          ? `正股腿不在订单里：本次只${def.legs[0].side === "sell" ? "卖出" : "买入"}期权，${shareTarget} 股 ${symbol} 需要你已持有。`
+          : "多腿期权会以一条 mleg 组合单发送；只有全部腿一起成交，避免裸腿风险。"}期权交易风险高，仅用于学习。</div>
         ${error ? html`<div class="error-banner">${error}</div>` : null}
-        <button class="btn btn-primary" disabled=${busy || !legs.length} onClick=${submit}>${busy ? "提交中…" : `提交 ${def.label}`}</button>
+        <button class="btn btn-primary" disabled=${busy || !legs.length || stockBlocked} onClick=${submit}>${busy ? "提交中…" : `提交 ${def.label}`}</button>
         <button class="btn btn-sm" onClick=${() => { setPriceTouched(false); setStrikes({}); }}>恢复默认行权价</button>
       </div>
     </div>
@@ -274,7 +303,7 @@ function PayoffChart({ data = [], spot, entry }) {
     <text x=${pad} y=${height - 2} fill="var(--muted-2)" font-size="9">${fmt.price(minPrice)}</text>
     <text x=${width - pad} y=${height - 2} fill="var(--muted-2)" font-size="9" text-anchor="end">${fmt.price(maxPrice)}</text>
     <text x=${x(spot || minPrice)} y=${pad - 4} fill="var(--muted)" font-size="9" text-anchor="middle">现价</text>
-    <text x=${width - pad} y=${pad + 8} fill="var(--muted-2)" font-size="9" text-anchor="end">净限价 ${fmt.price(entry)}</text>
+    <text x=${width - pad} y=${pad + 8} fill="var(--muted-2)" font-size="9" text-anchor="end">限价 ${fmt.price(entry)}</text>
   </svg>`;
 }
 

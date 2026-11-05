@@ -1,0 +1,9 @@
+{
+  "name": "minitrade-web",
+  "private": true,
+  "type": "module",
+  "description": "Browser assets have no build step; this file only lets node run the ES modules under test.",
+  "scripts": {
+    "test:js": "node --test \"tests/js/*.test.mjs\""
+  }
+}
