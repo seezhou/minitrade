@@ -271,7 +271,7 @@ python test_alpaca_connection.py                 # 手工连通性检查
 12. **条件码接口的 tape 参数**：Alpaca 的 `/v2/stocks/meta/conditions` 会 404，实际是 `/v2/stocks/meta/conditions/{trade|quote}` 且必须带 `tape=A|B|C`；本地接口已包一层，默认 `trade` + `C`。
 13. **完整链行数多**：`chain?full=true` 一次可能返回 80–100 行/侧（AAPL 近月 158 个合约），靠 `.option-scroll` 的 440px 高度滚动（已做 ATM 自动居中）；不要去掉 `max-height`，否则会把页面撑爆。
 14. **已实现盈亏是推导值**：Alpaca 的 activities 没有成本基准字段，`/api/account/realized-pnl` 用平均成本法从 FILL 推导，按月切窗（每窗 page_size=100），不含手续费与税费；卖单在窗口内找不到对应买入时返回 `null` + `reason`，不要改成猜测值。逐笔流水仍以 `/api/activities` 为准。
-15. **期权页窗口缩小后横向溢出**：在宽屏打开期权页再缩到移动宽度，`main.content` 的 `scrollWidth` 会停在约 979px（`documentElement` 多出约 589px），再触发 `resize` 也不恢复；直接以 390px 打开则正常（0 溢出）。属既有行为，与策略台无关，尚未定位到具体元素。
+15. ~~**期权页窗口缩小后横向溢出**~~（已修复 2026-11-06）：根因是 `.stack` 是单列 grid 且列宽为 `auto`，内部 `.chart-wrap` 里的 ECharts canvas 在宽屏下初始化为 934px，把列撑宽到 946px；`.chart-wrap` 因此始终测到 934px，`ResizeObserver` 认为尺寸没变而不触发 `chart.resize()`，形成死锁。修复：`.stack { grid-template-columns: minmax(0, 1fr); }`。修复后宽屏→390px 缩放 `documentElement` 溢出为 0，canvas 自动收缩到 348/312px；390px 直接打开与桌面布局均无回归。
 16. **新闻流没有权限**：`wss://stream.data.alpaca.markets/v1beta1/news` 认证/订阅成功但不推送数据，功能改为 `/api/news` 的 60 秒增量轮询（详见「新闻与价格提醒」）。要恢复实时流得先确认账户是否被授予 news 订阅。
 17. **价格提醒依赖延迟行情**：`/api/quotes` 约延迟 15 分钟，且只在页面打开时检查（切到后台会跳过轮询），不能当作实时止损工具。
 18. **期权 credit 组合表达不了**：`OptionOrderInput.limit_price` 是 `gt=0`，而 mleg 的 credit 净价必须是负数，请求在 pydantic 层就被拒（`tests/test_options_orders.py::test_credit_combo_cannot_be_expressed_yet` 记录了这个现状）。做铁鹰/信用价差前必须放开该约束，并同步改前端 `Math.max(0.01, netMid)` 与 `isCredit`（现按买卖腿数求和判定，铁鹰会得 0 而被当成 debit）。

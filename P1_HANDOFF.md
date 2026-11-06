@@ -788,6 +788,7 @@ Ticket:
 18. **新闻流没有权限**：`wss://stream.data.alpaca.markets/v1beta1/news` 在本账户认证/订阅都成功但**不推送数据**（REST 同时有新闻）。别再花时间重试 websocket，`news.js` 走的是 `/api/news` 的 60 秒增量轮询。要恢复实时流，先确认账户是否被授予 news 订阅。
 19. **期权 credit 组合被 schema 挡住**：`OptionOrderInput.limit_price` 是 `gt=0`，mleg 的 credit 净价必须为负，所以铁鹰/信用价差**连请求都构造不出来**。做 T0-2 先放开这个字段，再改前端 `Math.max(0.01, netMid)` 和 `isCredit`（现按腿的买卖数求和判定，铁鹰 = 0 → 误判成 debit）。`test_options_orders.py` 里有专门用例记录现状，改完后把那条断言反过来写。
 20. **带点号标的的期权下单会被拒**：OCC root 去点（`BRKB`）而 URL symbol 保留点（`BRK.B`），root 比较直接 422；`test_options_orders.py` 记录了当前行为。
+21. **单列 grid 会被 ECharts canvas 撑宽**：`.stack` 必须写 `grid-template-columns: minmax(0, 1fr)`，不能只写 `display: grid`。列宽 `auto` 时会被 `.chart-wrap` 里 canvas 的固定像素宽（宽屏初始化值）撑开，容器测到的宽度就不变，`ResizeObserver` 不触发 `chart.resize()`，窗口从宽屏缩到移动端会横向溢出且无法自愈。同理，新的 grid 容器只要可能放图表，列定义都要带 `minmax(0, 1fr)`。
 
 ---
 
