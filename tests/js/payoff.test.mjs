@@ -92,6 +92,94 @@ test("contract count scales the payoff", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Credit strategies: premium received, bounded risk
+// ---------------------------------------------------------------------------
+
+test("bull put spread caps profit at the credit and loss at the width", () => {
+  const curve = payoffCurve({
+    legs: [
+      { kind: "put", side: "sell", strike: 95 },
+      { kind: "put", side: "buy", strike: 90 },
+    ],
+    entry: 1.5,
+    qty: 1,
+    spot: 100,
+    credit: true,
+  });
+  assertValue(curve.points, 100, () => 150, "keeps the credit above the short strike");
+  close(curve.maxProfit, 150, "the credit is the cap");
+  close(curve.maxLoss, -350, "5 points wide minus the 1.5 credit");
+  close(curve.breakevens[0], 93.5, "short strike minus the credit");
+});
+
+test("bear call spread is the mirror image of the put spread", () => {
+  const curve = payoffCurve({
+    legs: [
+      { kind: "call", side: "sell", strike: 105 },
+      { kind: "call", side: "buy", strike: 110 },
+    ],
+    entry: 1.5,
+    qty: 1,
+    spot: 100,
+    credit: true,
+  });
+  assertValue(curve.points, 80, () => 150, "keeps the credit below the short strike");
+  close(curve.maxProfit, 150, "the credit is the cap");
+  close(curve.maxLoss, -350, "5 points wide minus the 1.5 credit");
+  close(curve.breakevens[0], 106.5, "short strike plus the credit");
+});
+
+test("iron condor collects the credit and loses at most one wing width", () => {
+  const curve = payoffCurve({
+    legs: [
+      { kind: "put", side: "buy", strike: 90 },
+      { kind: "put", side: "sell", strike: 95 },
+      { kind: "call", side: "sell", strike: 105 },
+      { kind: "call", side: "buy", strike: 110 },
+    ],
+    entry: 2,
+    qty: 1,
+    spot: 100,
+    credit: true,
+  });
+  assertValue(curve.points, 100, () => 200, "flat between the short strikes");
+  close(curve.maxProfit, 200, "the credit is the cap");
+  close(curve.maxLoss, -300, "5 wide minus the 2 credit, on either side");
+  assert.equal(curve.breakevens.length, 2);
+  close(curve.breakevens[0], 93, "lower breakeven");
+  close(curve.breakevens[1], 107, "upper breakeven");
+});
+
+test("a condor quoted as a debit would invert the whole curve", () => {
+  const credit = payoffCurve({
+    legs: [
+      { kind: "put", side: "buy", strike: 90 },
+      { kind: "put", side: "sell", strike: 95 },
+      { kind: "call", side: "sell", strike: 105 },
+      { kind: "call", side: "buy", strike: 110 },
+    ],
+    entry: 2,
+    qty: 1,
+    spot: 100,
+    credit: true,
+  });
+  const debit = payoffCurve({
+    legs: [
+      { kind: "put", side: "buy", strike: 90 },
+      { kind: "put", side: "sell", strike: 95 },
+      { kind: "call", side: "sell", strike: 105 },
+      { kind: "call", side: "buy", strike: 110 },
+    ],
+    entry: 2,
+    qty: 1,
+    spot: 100,
+    credit: false,
+  });
+  close(debit.maxProfit - credit.maxProfit, -400, "the sign of the premium flips 400");
+  close(debit.maxLoss - credit.maxLoss, -400, "and shifts the whole floor");
+});
+
+// ---------------------------------------------------------------------------
 // Covered call: stock leg + short call, premium received
 // ---------------------------------------------------------------------------
 

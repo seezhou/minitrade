@@ -37,12 +37,39 @@ const STRATEGIES = {
     desc: "买入虚值 Call + 虚值 Put，等待大波动",
     legs: [{ kind: "call", side: "buy", offset: 2 }, { kind: "put", side: "buy", offset: -2 }],
   },
+  // Credit strategies: the combo receives premium. Alpaca quotes the net price as a
+  // positive number (see the official iron condor example), so `limit_price` stays
+  // unsigned; only the payoff direction flips.
+  bear_call_spread: {
+    label: "熊市看涨价差",
+    desc: "卖出低行权价 Call，买入高行权价 Call，赚取权利金",
+    credit: true,
+    legs: [{ kind: "call", side: "sell", offset: 2 }, { kind: "call", side: "buy", offset: 4 }],
+  },
+  bull_put_spread: {
+    label: "牛市看跌价差",
+    desc: "卖出高行权价 Put，买入低行权价 Put，赚取权利金",
+    credit: true,
+    legs: [{ kind: "put", side: "sell", offset: -2 }, { kind: "put", side: "buy", offset: -4 }],
+  },
+  iron_condor: {
+    label: "铁鹰",
+    desc: "卖虚值 Put + 卖虚值 Call，两侧各买一张更虚值的合约做保护",
+    credit: true,
+    legs: [
+      { kind: "put", side: "buy", offset: -4 },
+      { kind: "put", side: "sell", offset: -1 },
+      { kind: "call", side: "sell", offset: 1 },
+      { kind: "call", side: "buy", offset: 4 },
+    ],
+  },
   // The two `stock` strategies carry a share leg that is NOT part of the order:
   // you must already own 100 shares per contract, and only the option leg is sent.
   covered_call: {
     label: "备兑看涨",
     desc: "持有 100 股 + 卖出 Call，收权利金、封顶上方收益",
     stock: "long",
+    credit: true,
     legs: [{ kind: "call", side: "sell", offset: 2 }],
   },
   protective_put: {
@@ -98,8 +125,10 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
   const puts = chain?.puts || [];
   const def = STRATEGIES[strategy] || STRATEGIES.long_call;
   const canMarket = def.legs.length === 1;
-  // A covered call receives premium; every other strategy on this desk pays it.
-  const isCredit = def.legs.reduce((sum, leg) => sum + (leg.side === "buy" ? 1 : -1), 0) < 0;
+  // Premium direction is declared per strategy. The leg-sum fallback keeps older
+  // definitions working, but it reads 0 for a condor (two buys + two sells) and would
+  // silently treat a credit as a debit.
+  const isCredit = def.credit ?? def.legs.reduce((sum, leg) => sum + (leg.side === "buy" ? 1 : -1), 0) < 0;
   const unboundedProfit = ["long_call", "long_straddle", "long_strangle", "protective_put"].includes(strategy);
 
   const stockPosition = useMemo(() => {
@@ -177,7 +206,7 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
     if (stockBlocked) return setError(`正股不足：需要 ${shareTarget} 股 ${symbol}，当前持有 ${stockPosition.qty} 股。`);
     const summary = legs.map((leg) => `${leg.side === "buy" ? "买" : "卖"} ${leg.contract.symbol}`).join(" / ");
     const stockLine = def.stock ? `\n正股 ${symbol}：持有 ${stockPosition.qty} 股 / 需要 ${shareTarget} 股（不计入本次订单）` : "";
-    const priceLine = `${def.legs.length > 1 ? "净限价" : "限价"} $${entry.toFixed(2)}`;
+    const priceLine = `${def.legs.length > 1 ? "净限价" : "限价"} $${entry.toFixed(2)}${isCredit ? "（净收入）" : "（净支出）"}`;
     if (!confirm(`${def.label}\n${summary}${stockLine}\n${qty} 组，${orderType === "limit" ? priceLine : "市价"}。\n\n确认发送到 Alpaca 纸面账户？`)) return;
     setBusy(true);
     try {
@@ -231,7 +260,7 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
         </select>
       </div>
       <div class="field">
-        <label>${def.legs.length > 1 ? "净限价（每股）" : "限价（每股）"}</label>
+        <label>${def.legs.length > 1 ? "净限价（每股）" : "限价（每股）"}${isCredit ? " · 收权利金" : ""}</label>
         <div class="input-wrap">
           <input class="input" type="number" min="0.01" step="0.01" value=${limitPrice} disabled=${orderType === "market"} onInput=${(event) => { setPriceTouched(true); setLimitPrice(event.currentTarget.value); }} />
           <span class="input-suffix">USD</span>
@@ -272,7 +301,7 @@ export function OptionsStrategy({ symbol, chain, expiry, spot }) {
       <div class="stack" style="gap:8px">
         <div class="modal-note">${def.stock
           ? `正股腿不在订单里：本次只${def.legs[0].side === "sell" ? "卖出" : "买入"}期权，${shareTarget} 股 ${symbol} 需要你已持有。`
-          : "多腿期权会以一条 mleg 组合单发送；只有全部腿一起成交，避免裸腿风险。"}期权交易风险高，仅用于学习。</div>
+          : `多腿期权会以一条 mleg 组合单发送；只有全部腿一起成交，避免裸腿风险。${isCredit ? "收取权利金时，净限价仍填正数（Alpaca 用绝对值表示）。" : ""}`}期权交易风险高，仅用于学习。</div>
         ${error ? html`<div class="error-banner">${error}</div>` : null}
         <button class="btn btn-primary" disabled=${busy || !legs.length || stockBlocked} onClick=${submit}>${busy ? "提交中…" : `提交 ${def.label}`}</button>
         <button class="btn btn-sm" onClick=${() => { setPriceTouched(false); setStrikes({}); }}>恢复默认行权价</button>

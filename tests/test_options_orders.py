@@ -5,9 +5,10 @@ option order, and it has two very different shapes: a single leg becomes a plain
 `/v2/orders` ticket, while two or more legs become an `mleg` combo with a net price.
 Both are covered here, offline, with a faked upstream — no order is ever sent.
 
-Known gap recorded on purpose: `limit_price` is constrained to `> 0`, so a net
-**credit** combo (iron condor, credit spread) cannot be expressed today. See
-`test_credit_combo_cannot_be_expressed_yet`.
+Credit combos (iron condor, credit spreads) quote their net price as a **positive**
+number: measured on the paper account, a far-from-market 4-leg condor with
+`sell_to_open` on both short legs and `limit_price: "99.00"` is accepted verbatim.
+So `limit_price` stays unsigned and `gt=0` is the correct constraint.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from app.options import OptionOrderInput, _parse_occ
 CALL_200 = "AAPL261120C00200000"
 CALL_210 = "AAPL261120C00210000"
 PUT_150 = "AAPL261120P00150000"
+PUT_160 = "AAPL261120P00160000"
 
 ORDER_RAW = {
     "id": "opt-1",
@@ -122,21 +124,61 @@ def test_out_of_range_inputs_are_rejected_by_the_schema(overrides):
         order(**overrides)
 
 
-def test_credit_combo_cannot_be_expressed_yet():
-    """Recorded limitation, not desired behaviour.
+def test_credit_combo_forwards_a_positive_net_price(client, upstream):
+    """An iron condor is a credit combo that still quotes a positive net price.
 
-    An `mleg` credit combo (iron condor, credit spread) quotes a **negative** net
-    price at Alpaca. `OptionOrderInput.limit_price` is `gt=0`, so such an order is
-    rejected before it ever reaches the route. Implementing T0-2 requires relaxing
-    this field (and the frontend's `Math.max(0.01, ...)` clamp); when that happens,
-    this test should be replaced with one that asserts a negative net price is
-    forwarded verbatim.
+    Verified against the paper account: the same four legs with a `limit_price` of
+    `"99.00"` came back `accepted`, so credit trades must not use a negative price.
     """
-    with pytest.raises(ValidationError):
-        order(
-            limit_price=-1.5,
-            legs=[leg(symbol=PUT_150, side="buy"), leg(symbol=CALL_210, side="sell")],
-        )
+    calls = upstream("app.options", lambda path, params: ORDER_RAW)
+    response = post(
+        client,
+        {
+            "legs": [
+                leg(symbol=PUT_150, side="buy"),
+                leg(symbol=PUT_160, side="sell"),
+                leg(symbol=CALL_200, side="sell"),
+                leg(symbol=CALL_210, side="buy"),
+            ],
+            "qty": 1,
+            "order_type": "limit",
+            "limit_price": 1.8,
+        },
+    )
+
+    assert response.status_code == 201
+    body = calls[0][1]
+    assert body["order_class"] == "mleg"
+    assert body["limit_price"] == "1.8", "the credit is sent as an absolute value"
+    assert body["qty"] == "1"
+    assert [item["side"] for item in body["legs"]] == ["buy", "sell", "sell", "buy"]
+    assert [item["position_intent"] for item in body["legs"]] == [
+        "buy_to_open",
+        "sell_to_open",
+        "sell_to_open",
+        "buy_to_open",
+    ]
+
+
+def test_credit_spread_keeps_every_leg_ratio_at_one(client, upstream):
+    """A condor's leg ratios must reduce to 1:1:1:1, otherwise Alpaca rejects it."""
+    calls = upstream("app.options", lambda path, params: ORDER_RAW)
+    post(
+        client,
+        {
+            "legs": [
+                leg(symbol=PUT_150, side="buy"),
+                leg(symbol=PUT_160, side="sell"),
+                leg(symbol=CALL_200, side="sell"),
+                leg(symbol=CALL_210, side="buy"),
+            ],
+            "order_type": "limit",
+            "limit_price": 2.4,
+        },
+    )
+    ratios = [item["ratio_qty"] for item in calls[0][1]["legs"]]
+    assert ratios == ["1", "1", "1", "1"]
+
 
 
 # ---------------------------------------------------------------------------
