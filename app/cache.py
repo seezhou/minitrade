@@ -1,15 +1,26 @@
-"""Small thread-safe TTL cache with stale-value fallback."""
+"""Small thread-safe TTL cache with stale-value fallback and an LRU cap."""
 from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Callable
+
+DEFAULT_MAX_ENTRIES = 2048
 
 
 class TTLCache:
-    def __init__(self) -> None:
+    """TTL map that also evicts the least recently used entry once it is full.
+
+    TTL alone lets the process grow without bound while someone browses many
+    symbols; the cap keeps memory flat. `peek` deliberately does not touch the
+    recency order, so stale fallback cannot keep a dead key alive.
+    """
+
+    def __init__(self, max_entries: int = DEFAULT_MAX_ENTRIES) -> None:
         self._lock = threading.RLock()
-        self._values: dict[str, tuple[float, Any]] = {}
+        self._values: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+        self.max_entries = max(1, int(max_entries))
 
     def get(self, key: str, ttl: float) -> Any | None:
         with self._lock:
@@ -18,6 +29,7 @@ class TTLCache:
                 return None
             stored_at, value = entry
             if time.monotonic() - stored_at <= ttl:
+                self._values.move_to_end(key)
                 return value
             return None
 
@@ -29,6 +41,9 @@ class TTLCache:
     def set(self, key: str, value: Any) -> Any:
         with self._lock:
             self._values[key] = (time.monotonic(), value)
+            self._values.move_to_end(key)
+            while len(self._values) > self.max_entries:
+                self._values.popitem(last=False)
         return value
 
     def get_or_set(
@@ -58,6 +73,10 @@ class TTLCache:
                 return
             for key in [key for key in self._values if key.startswith(prefix)]:
                 self._values.pop(key, None)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._values)
 
 
 cache = TTLCache()
