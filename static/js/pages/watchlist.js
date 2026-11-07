@@ -152,19 +152,19 @@ export function WatchlistPage() {
           <button class="btn btn-sm" onClick=${quotesQuery.reload}><${Icon} name="refresh" size=${13} />刷新</button>
         </div>
 
-        ${rows.length ? html`<div class="table-wrap"><table class="table">
+        ${rows.length ? html`<div class="table-wrap"><table class="table table-cards">
           <thead><tr><th>股票</th><th class="r">最新价</th><th class="r">涨跌幅</th><th class="r col-range">日区间</th><th class="r col-volume">成交量</th><th class="c col-spark">30 日走势</th><th class="r col-actions">操作</th></tr></thead>
           <tbody>${rows.map((row) => html`<tr>
-            <td><div class="sym-cell" style="cursor:pointer" onClick=${() => navigate(stockPath(row.symbol))}>
+            <td data-label="股票"><div class="sym-cell" style="cursor:pointer" onClick=${() => navigate(stockPath(row.symbol))}>
               <${Logo} symbol=${row.symbol} />
               <div><div class="sym">${row.symbol}</div><div class="nm">${row.name}</div></div>
             </div></td>
-            <td class="r"><b>${fmt.price(row.price)}</b><div class=${cls("text-xs", toneClass(row.change))}>${row.change != null ? fmt.moneySigned(row.change) : "—"}</div></td>
-            <td class=${cls("r", toneClass(row.change_pct))}><b>${row.change_pct != null ? fmt.pct(row.change_pct) : "—"}</b></td>
-            <td class="r text-muted col-range">${row.day_is_today ? `${fmt.price(row.low)} – ${fmt.price(row.high)}` : `昨收 ${fmt.price(row.previous_close)}`}</td>
-            <td class="r text-muted col-volume">${row.volume != null ? fmt.compact(row.volume) : "—"}</td>
-            <td class="c col-spark"><${Sparkline} values=${row.spark || []} width=${74} height=${26} /></td>
-            <td class="r col-actions"><div class="watch-actions">
+            <td data-label="最新价" class="r"><b>${fmt.price(row.price)}</b><div class=${cls("text-xs", toneClass(row.change))}>${row.change != null ? fmt.moneySigned(row.change) : "—"}</div></td>
+            <td data-label="涨跌幅" class=${cls("r", toneClass(row.change_pct))}><b>${row.change_pct != null ? fmt.pct(row.change_pct) : "—"}</b></td>
+            <td data-label="日区间" class="r text-muted col-range">${row.day_is_today ? `${fmt.price(row.low)} – ${fmt.price(row.high)}` : `昨收 ${fmt.price(row.previous_close)}`}</td>
+            <td data-label="成交量" class="r text-muted col-volume">${row.volume != null ? fmt.compact(row.volume) : "—"}</td>
+            <td data-label="30 日走势" class="c col-spark"><${Sparkline} values=${row.spark || []} width=${74} height=${26} /></td>
+            <td data-label="操作" class="r col-actions"><div class="watch-actions">
               <button class="btn btn-sm" onClick=${() => openTrade(row.symbol, "buy")}>买入</button>
               <button class="btn btn-ghost btn-icon btn-sm" title="移除" onClick=${() => removeSymbol(row.symbol)}><${Icon} name="trash" size=${13} /></button>
             </div></td>

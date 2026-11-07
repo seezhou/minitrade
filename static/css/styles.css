@@ -1029,7 +1029,35 @@ tr:hover .watch-actions { opacity: 1; }
   .hero-spark { display: none; }
 }
 @media (max-width: 680px) {
-  .col-range, .col-volume, .col-spark, .col-change, .col-actions { display: none; }
+  .table:not(.table-cards) .col-range,
+  .table:not(.table-cards) .col-volume,
+  .table:not(.table-cards) .col-spark,
+  .table:not(.table-cards) .col-change,
+  .table:not(.table-cards) .col-actions { display: none; }
+
+  /* `.table-cards` keeps every column on phones by turning each row into a card,
+     with the header text replayed from `data-label`. Used by the watchlist, where
+     dropping the range/volume/sparkline columns loses the useful part of the row. */
+  .table-cards thead { display: none; }
+  .table-cards tbody tr {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px 14px; padding: 12px 2px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .table-cards tbody tr:last-child { border-bottom: 0; }
+  .table-cards tbody td {
+    display: block; padding: 0; border: 0;
+    text-align: left; font-size: 12px;
+  }
+  .table-cards tbody td:first-child { grid-column: 1 / -1; }
+  .table-cards tbody td::before {
+    content: attr(data-label); display: block;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.4px;
+    color: var(--muted-2); text-transform: uppercase; margin-bottom: 2px;
+  }
+  .table-cards tbody td:first-child::before { display: none; }
+  .table-cards tbody td .watch-actions { justify-content: flex-start; }
+
   .order-grid { grid-template-columns: 1fr; }
   .fact-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hero-account { padding: 18px; }
